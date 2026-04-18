@@ -1,6 +1,4 @@
-// =========================
-// ESPDynetGateway.ino
-// =========================
+#include <Arduino.h>
 
 #include "Globals.h"
 #include "WiFiManager.h"

@@ -753,7 +753,8 @@ static void handleFwCheckUpdate() {
 
 #if defined(ESP8266)
   ESPhttpUpdate.rebootOnUpdate(false);
-  t_httpUpdate_return result = ESPhttpUpdate.update(binUrl);
+  WiFiClient client;
+  t_httpUpdate_return result = ESPhttpUpdate.update(client, binUrl, current);
   bool ok = (result == HTTP_UPDATE_OK);
 #else
   httpUpdate.rebootOnUpdate(false);

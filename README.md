@@ -4,7 +4,12 @@ This is a Gateway based on ESP devices that allow to integrate Dynalite System D
 
 ## PlatformIO support
 
-This project is now buildable with PlatformIO without changing firmware logic.
+This project is now organized as a standard PlatformIO project:
+
+- firmware sources are in `src/`
+- headers are in `include/`
+
+Firmware logic was not changed; only project/build structure was adapted.
 
 ### Quick start
 
@@ -24,5 +29,4 @@ This project is now buildable with PlatformIO without changing firmware logic.
 
 ### Notes
 
-- `src_dir` is set to repository root so the existing Arduino IDE file layout remains unchanged.
 - LittleFS is enabled for both ESP8266 and ESP32 environments.

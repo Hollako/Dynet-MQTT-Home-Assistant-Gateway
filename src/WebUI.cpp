@@ -9,6 +9,7 @@
   #include <ESP8266WebServer.h>
   #include <ESP8266HTTPClient.h>
   #include <ESP8266httpUpdate.h>
+  #include <WiFiClientSecure.h>
   using HttpServer = ESP8266WebServer;
   #include <Updater.h>            // (alias of Update.h on ESP8266 cores)
   #define UPDATE_ABORT() do { Update.end(); } while(0)
@@ -16,6 +17,7 @@
   #include <WebServer.h>
   #include <HTTPClient.h>
   #include <HTTPUpdate.h>
+  #include <WiFiClientSecure.h>
   using HttpServer = WebServer;
   #include <Update.h>
    #define UPDATE_ABORT() do { Update.abort(); } while(0)
@@ -643,8 +645,10 @@ static int compareVersion(const String& aRaw, const String& bRaw) {
 static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {
   const char* latestApiUrl = "https://api.github.com/repos/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
   HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
   http.setTimeout(12000);
-  http.begin(latestApiUrl);
+  http.begin(client, latestApiUrl);
   http.addHeader("Accept", "application/vnd.github+json");
   http.addHeader("User-Agent", "dynet-gateway-ota");
 

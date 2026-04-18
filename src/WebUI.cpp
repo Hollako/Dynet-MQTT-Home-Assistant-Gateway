@@ -158,7 +158,8 @@ static String gpioOptions(int current) {
 #else
   // ESP32 — list your preferred pins here
   for (int p : {1,3,4,5,12,13,14,15,16,17,18,19,21,22,23,25,26,27,32,33}) {
-    o += gpioOpt(p, String("GPIO") + String(p)).c_str(), current);
+    String label = String("GPIO") + String(p);
+    o += gpioOpt(p, label.c_str(), current);
   }
 #endif
   return o;

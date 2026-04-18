@@ -7,11 +7,15 @@
 // === HTTP server type & Update include ======================================
 #if defined(ESP8266)
   #include <ESP8266WebServer.h>
+  #include <ESP8266HTTPClient.h>
+  #include <ESP8266httpUpdate.h>
   using HttpServer = ESP8266WebServer;
   #include <Updater.h>            // (alias of Update.h on ESP8266 cores)
   #define UPDATE_ABORT() do { Update.end(); } while(0)
 #else
   #include <WebServer.h>
+  #include <HTTPClient.h>
+  #include <HTTPUpdate.h>
   using HttpServer = WebServer;
   #include <Update.h>
    #define UPDATE_ABORT() do { Update.abort(); } while(0)
@@ -23,6 +27,7 @@ extern HttpServer server;
 // Forward declarations for the firmware page handlers (still file scope)
 static void handleFwGet();
 static void handleFwUpload();
+static void handleFwCheckUpdate();
 
 // Expose the route registrar (Call this from registerWebRoutes)
 void registerFwRoutes();
@@ -611,26 +616,98 @@ static String fwVersionString() {
 #endif
 }
 
+static String normalizeVersion(String v) {
+  v.trim();
+  if (v.length() && (v[0] == 'v' || v[0] == 'V')) v.remove(0, 1);
+  return v;
+}
+
+static int compareVersion(const String& aRaw, const String& bRaw) {
+  String a = normalizeVersion(aRaw);
+  String b = normalizeVersion(bRaw);
+  int ai = 0, bi = 0;
+  while (ai < (int)a.length() || bi < (int)b.length()) {
+    long av = 0, bv = 0;
+    while (ai < (int)a.length() && isDigit(a[ai])) { av = av * 10 + (a[ai++] - '0'); }
+    while (bi < (int)b.length() && isDigit(b[bi])) { bv = bv * 10 + (b[bi++] - '0'); }
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+    while (ai < (int)a.length() && a[ai] != '.') ai++;
+    while (bi < (int)b.length() && b[bi] != '.') bi++;
+    if (ai < (int)a.length()) ai++;
+    if (bi < (int)b.length()) bi++;
+  }
+  return 0;
+}
+
+static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {
+  const char* latestApiUrl = "https://api.github.com/repos/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
+  HTTPClient http;
+  http.setTimeout(12000);
+  http.begin(latestApiUrl);
+  http.addHeader("Accept", "application/vnd.github+json");
+  http.addHeader("User-Agent", "dynet-gateway-ota");
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    outErr = String("GitHub API request failed (HTTP ") + code + ").";
+    http.end();
+    return false;
+  }
+
+  DynamicJsonDocument doc(16384);
+  DeserializationError jerr = deserializeJson(doc, http.getStream());
+  http.end();
+  if (jerr) {
+    outErr = "Invalid JSON from GitHub.";
+    return false;
+  }
+
+  outTag = doc["tag_name"] | "";
+  JsonArray assets = doc["assets"].as<JsonArray>();
+  for (JsonVariant v : assets) {
+    const char* name = v["name"] | "";
+    const char* url  = v["browser_download_url"] | "";
+    if (name && url && String(name).endsWith(".bin")) {
+      outBinUrl = String(url);
+      break;
+    }
+  }
+
+  if (!outTag.length()) {
+    outErr = "No release tag found.";
+    return false;
+  }
+  if (!outBinUrl.length()) {
+    outErr = "No .bin firmware asset found in latest release.";
+    return false;
+  }
+  return true;
+}
+
 static void handleFwGet() {
   const char* otaReleaseUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
   pageBegin("Firmware Update");
 
   pageWrite(F("<div class='card'>"
               "<div class='title'>Manual Firmware Update</div>"));
-  pageWrite(F("<p>Current: "));
+  pageWrite(F("<p>Current release: <b>"));
+  pageWrite(String(HA_SW_VERSION));
+  pageWrite(F("</b></p>"
+              "<p>Current firmware details: "));
   pageWrite(fwVersionString());
   pageWrite(F("</p>"
               "<form method='POST' action='/fw' enctype='multipart/form-data' class='form-sec'>"
               "<div class='field'>"
-                "<label>Firmware .bin</label>"
                 "<input type='file' name='fw' accept='.bin' required>"
               "</div>"
               "<div class='row' style='margin-top:10px'>"
-                "<button type='submit' class='btn'>Upload</button>"
                 "<button type='submit' class='btn'>Update</button>"
               "</div>"
+              "</form>"
+              "<form method='POST' action='/fw/check' class='form-sec'>"
               "<div class='row' style='margin-top:10px'>"
-                "<a class='btn' href='/'>Cancel</a>"
+                "<button type='submit' class='btn'>Check for Update</button>"
               "</div>"
               "</form>"
               "<div class='field' style='margin-top:16px'>"
@@ -647,6 +724,62 @@ static void handleFwGet() {
               "<p style='opacity:.7'>Do not power off during update. Device will reboot automatically.</p>"
               "</div>"));
 
+  pageEnd();
+}
+
+static void handleFwCheckUpdate() {
+  String latestTag, binUrl, err;
+  if (!fetchLatestReleaseInfo(latestTag, binUrl, err)) {
+    pageBegin("Firmware Update");
+    pageWrite(F("<div class='card'><div class='title'>Update Check Failed</div><p>"));
+    pageWrite(err);
+    pageWrite(F("</p><a class='btn' href='/fw'>Back</a></div>"));
+    pageEnd();
+    return;
+  }
+
+  String current = normalizeVersion(String(HA_SW_VERSION));
+  String latest = normalizeVersion(latestTag);
+  if (compareVersion(latest, current) <= 0) {
+    pageBegin("Firmware Update");
+    pageWrite(F("<div class='card'><div class='title'>No New Release</div><p>Current firmware is up to date.</p><p>Current: "));
+    pageWrite(current);
+    pageWrite(F("<br>Latest: "));
+    pageWrite(latest);
+    pageWrite(F("</p><a class='btn' href='/fw'>Back</a></div>"));
+    pageEnd();
+    return;
+  }
+
+#if defined(ESP8266)
+  ESPhttpUpdate.rebootOnUpdate(false);
+  t_httpUpdate_return result = ESPhttpUpdate.update(binUrl);
+  bool ok = (result == HTTP_UPDATE_OK);
+#else
+  httpUpdate.rebootOnUpdate(false);
+  t_httpUpdate_return result = httpUpdate.update(binUrl);
+  bool ok = (result == HTTP_UPDATE_OK);
+#endif
+
+  if (ok) {
+    sendRebootingPage("Update Successful",
+                      (String("Installed release ") + latest + ". Rebooting...").c_str(),
+                      10, 1200);
+    scheduleReboot(1200);
+    return;
+  }
+
+  String failReason = "Update download/apply failed.";
+#if defined(ESP8266)
+  failReason += String(" ") + ESPhttpUpdate.getLastErrorString();
+#else
+  failReason += String(" ") + httpUpdate.getLastErrorString();
+#endif
+
+  pageBegin("Firmware Update");
+  pageWrite(F("<div class='card'><div class='title'>Update Failed</div><p>"));
+  pageWrite(failReason);
+  pageWrite(F("</p><a class='btn' href='/fw'>Back</a></div>"));
   pageEnd();
 }
 
@@ -818,6 +951,7 @@ void handleRestoreBackupPost() {
   void registerFwRoutes() {
     // GET: show form
     server.on("/fw", HTTP_GET, handleFwGet);
+    server.on("/fw/check", HTTP_POST, handleFwCheckUpdate);
 
     // POST: upload (note the "upload handler" as 2nd lambda/func)
     server.on("/fw", HTTP_POST,

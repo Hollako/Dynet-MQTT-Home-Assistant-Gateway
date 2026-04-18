@@ -577,7 +577,7 @@ void mqttEnsureConnected() {
   mqtt.setCallback(mqttCallback);
 
   String willTopic = availabilityTopic();
-  String cid = "DyNetESP-" + mqttSafeId(deviceId) + "-" + String(ESP.getChipId(), HEX);
+  String cid = "DyNetESP-" + mqttSafeId(deviceId) + "-" + CHIP_ID_STR;
 
   bool ok;
   if (strlen(cfg.mqtt_user) > 0)

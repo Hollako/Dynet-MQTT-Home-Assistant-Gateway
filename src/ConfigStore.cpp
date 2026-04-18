@@ -45,7 +45,7 @@ bool loadConfig() {
 }
 
 bool saveConfig() {
-  if (deviceId.length() == 0) deviceId = String(ESP.getChipId(), HEX);
+  if (deviceId.length() == 0) deviceId = CHIP_ID_STR;
 
   DynamicJsonDocument doc(2048);
   doc["device_id"]    = deviceId;

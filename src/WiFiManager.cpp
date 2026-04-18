@@ -30,7 +30,11 @@ void beginSTAIfCreds() {
 
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
+#if defined(ESP8266)
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
+#else
+  WiFi.setSleep(false);
+#endif
   WiFi.hostname(deviceId.c_str());
 
   WiFi.disconnect(true);
@@ -112,6 +116,7 @@ void updateWiFiSM() {
 }
 
 void installWiFiDebugHandlers() {
+#if defined(ESP8266)
   WiFi.onStationModeConnected([](const WiFiEventStationModeConnected& ev){
     staStatus = WL_CONNECTED; 
     staDiscReason = 0;
@@ -157,6 +162,49 @@ void installWiFiDebugHandlers() {
     nextStaAttempt = millis() + (STA_RETRY_INTERVAL / 2);
     Serial.println("[WIFI] DHCP_TIMEOUT");
   });
+#else
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
+      staStatus = WL_CONNECTED;
+      staDiscReason = 0;
+      staLastEvent = "CONNECTED";
+      lastStaChangeMs = millis();
+      staBusy = true;  // until we get IP
+      Serial.println("[WIFI] CONNECTED");
+      return;
+    }
+
+    if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+      staStatus = WL_CONNECTED;
+      staDiscReason = 0;
+      staLastEvent = "GOT_IP " + WiFi.localIP().toString();
+      lastStaChangeMs = millis();
+      staBusy = false;  // success
+      staRetries = 0;   // reset retries
+      Serial.printf("[WIFI] %s gw=%s mask=%s rssi=%d dBm\n",
+        staLastEvent.c_str(),
+        WiFi.gatewayIP().toString().c_str(),
+        WiFi.subnetMask().toString().c_str(),
+        WiFi.RSSI());
+      return;
+    }
+
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+      staStatus = WL_DISCONNECTED;
+      staDiscReason = info.wifi_sta_disconnected.reason;
+      staLastEvent = String("DISCONNECTED reason=") + reasonToStr(staDiscReason)
+                  + " (" + String(staDiscReason) + ")";
+      lastStaChangeMs = millis();
+      staBusy = false;
+
+      const bool manualLeave = (staDiscReason == 8);  // ASSOC_LEAVE
+      if (!manualLeave && staRetries < MAX_STA_RETRY) staRetries++;
+
+      nextStaAttempt = millis() + STA_RETRY_INTERVAL;
+      Serial.printf("[WIFI] %s (retry=%u)\n", staLastEvent.c_str(), staRetries);
+    }
+  });
+#endif
 }
 
 void wifiSetup() { 
@@ -167,5 +215,4 @@ void wifiSetup() {
 }
 
 void wifiLoop()  { updateWiFiSM(); }
-
 

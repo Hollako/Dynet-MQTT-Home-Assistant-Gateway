@@ -644,17 +644,24 @@ static int compareVersion(const String& aRaw, const String& bRaw) {
 
 static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {
   const char* latestApiUrl = "https://api.github.com/repos/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
+
+  if (WiFi.status() != WL_CONNECTED) {
+    outErr = "Wi-Fi station is not connected to the internet. Connect STA Wi-Fi first, then retry update check.";
+    return false;
+  }
+
   HTTPClient http;
   WiFiClientSecure client;
   client.setInsecure();
   http.setTimeout(12000);
+  http.useHTTP10(true);
   http.begin(client, latestApiUrl);
   http.addHeader("Accept", "application/vnd.github+json");
   http.addHeader("User-Agent", "dynet-gateway-ota");
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
-    outErr = String("GitHub API request failed (HTTP ") + code + ").";
+    outErr = String("GitHub API request failed (HTTP ") + code + "): " + HTTPClient::errorToString(code) + ".";
     http.end();
     return false;
   }

@@ -612,6 +612,7 @@ static String fwVersionString() {
 }
 
 static void handleFwGet() {
+  const char* otaReleaseUrl = "https://github.com/<your-org>/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
   pageBegin("Firmware Update");
 
   pageWrite(F("<div class='card'>"
@@ -624,11 +625,25 @@ static void handleFwGet() {
                 "<label>Firmware .bin</label>"
                 "<input type='file' name='fw' accept='.bin' required>"
               "</div>"
-              "<div class='inline'>"
-                "<button type='submit'>Upload & Update</button>"
+              "<div class='row' style='margin-top:10px'>"
+                "<button type='submit' class='btn'>Upload</button>"
+                "<button type='submit' class='btn'>Update</button>"
+              "</div>"
+              "<div class='row' style='margin-top:10px'>"
                 "<a class='btn' href='/'>Cancel</a>"
               "</div>"
               "</form>"
+              "<div class='field' style='margin-top:16px'>"
+                "<label>OTA URL (GitHub release)</label>"
+                "<input type='text' class='in wide' readonly value='"));
+  pageWrite(String(otaReleaseUrl));
+  pageWrite(F("'>"
+              "</div>"
+              "<div class='row' style='margin-top:10px'>"
+                "<a class='btn' target='_blank' rel='noopener' href='"));
+  pageWrite(String(otaReleaseUrl));
+  pageWrite(F("'>Open GitHub Release</a>"
+              "</div>"
               "<p style='opacity:.7'>Do not power off during update. Device will reboot automatically.</p>"
               "</div>"));
 

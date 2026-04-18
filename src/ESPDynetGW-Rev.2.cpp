@@ -29,7 +29,7 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   String eid;
   if (eepromLoadDeviceId(eid)) deviceId = eid;
-  else { deviceId = String(ESP.getChipId(), HEX); eepromSaveDeviceId(deviceId); }
+  else { deviceId = CHIP_ID_STR; eepromSaveDeviceId(deviceId); }
 
   if (!LittleFS.begin()) { LittleFS.format(); LittleFS.begin(); }
 
@@ -93,7 +93,9 @@ void loop() {
 
   // Optional OTA / mDNS service
    ArduinoOTA.handle();
+#if defined(ESP8266)
    MDNS.update();
+#endif
 
   // Periodic area/channel poll after preset changes
   dynetPollAreas();
@@ -103,4 +105,3 @@ void loop() {
 
   yield();
 }
-

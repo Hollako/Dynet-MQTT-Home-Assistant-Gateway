@@ -612,7 +612,7 @@ static String fwVersionString() {
 }
 
 static void handleFwGet() {
-  const char* otaReleaseUrl = "https://github.com/<your-org>/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
+  const char* otaReleaseUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
   pageBegin("Firmware Update");
 
   pageWrite(F("<div class='card'>"

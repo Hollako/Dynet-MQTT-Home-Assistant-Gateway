@@ -769,7 +769,8 @@ static void handleFwCheckUpdate() {
   bool ok = (result == HTTP_UPDATE_OK);
 #else
   httpUpdate.rebootOnUpdate(false);
-  t_httpUpdate_return result = httpUpdate.update(binUrl);
+  WiFiClient client;
+  t_httpUpdate_return result = httpUpdate.update(client, binUrl, current);
   bool ok = (result == HTTP_UPDATE_OK);
 #endif
 

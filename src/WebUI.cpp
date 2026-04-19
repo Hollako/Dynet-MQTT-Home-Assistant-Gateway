@@ -773,6 +773,12 @@ static bool probeMfln(uint16_t maxSize) {
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
+  // Shrink TLS I/O buffers: default RX is 16 384 bytes — the biggest single heap
+  // allocation in the TLS stack on ESP8266.  4 096 bytes is enough because GitHub's
+  // servers send TLS records well within that limit, and BearSSL reassembles records
+  // across multiple reads automatically.  This saves ~12 KB of heap.
+  client.setBufferSizes(512, 4096);
+
   // Built lazily once via a pointer; append() must NOT run on every call or the
   // list grows on repeated OTA checks, leaking heap and BearSSL parse state.
   static BearSSL::X509List* certBundle = nullptr;

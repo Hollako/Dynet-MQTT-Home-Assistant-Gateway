@@ -31,6 +31,7 @@ extern HttpServer server;
 static void handleFwGet();
 static void handleFwUpload();
 static void handleFwCheckUpdate();
+static void handleFwDoUpdate();
 static void handleNetCheck();
 
 // Expose the route registrar (Call this from registerWebRoutes)
@@ -791,6 +792,26 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
   return true;
 }
 
+static bool runOtaFromUrl(const String& binUrl, const String& currentVersion, String& outErr) {
+#if defined(ESP8266)
+  ESPhttpUpdate.rebootOnUpdate(false);
+  WiFiClient client;
+  t_httpUpdate_return result = ESPhttpUpdate.update(client, binUrl, currentVersion);
+  if (result == HTTP_UPDATE_OK) return true;
+  outErr = ESPhttpUpdate.getLastErrorString();
+#else
+  httpUpdate.rebootOnUpdate(false);
+  WiFiClient client;
+  t_httpUpdate_return result = httpUpdate.update(client, binUrl, currentVersion);
+  if (result == HTTP_UPDATE_OK) return true;
+  outErr = httpUpdate.getLastErrorString();
+#endif
+  return false;
+}
+
+static String gPendingUpdateTag;
+static String gPendingUpdateUrl;
+
 static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, String& outErr) {
   WiFiClient client;
   client.setTimeout(timeoutMs / 1000);
@@ -993,6 +1014,18 @@ static void handleFwGet() {
                 "<button type='submit' class='btn'>Check for Update</button>"
               "</div>"
               "</form>"
+              ));
+  if (gPendingUpdateTag.length() && gPendingUpdateUrl.length()) {
+    pageWrite(F("<div class='card' style='margin-top:10px'>"
+                "<div class='title'>Pending update available</div><p>Release: <b>"));
+    pageWrite(gPendingUpdateTag);
+    pageWrite(F("</b></p>"
+                "<form method='POST' action='/fw/update'>"
+                  "<button type='submit' class='btn'>Install Pending Update</button>"
+                "</form>"
+                "</div>"));
+  }
+  pageWrite(F(
               "<div class='row' style='margin-top:10px'>"
                 "<a class='btn' href='/netcheck' target='_blank' rel='noopener'>Run Internet Check</a>"
               "</div>"
@@ -1036,6 +1069,8 @@ static void handleFwCheckUpdate() {
   String current = normalizeVersion(String(HA_SW_VERSION));
   String latest = normalizeVersion(latestTag);
   if (compareVersion(latest, current) <= 0) {
+    gPendingUpdateTag = "";
+    gPendingUpdateUrl = "";
     pageBegin("Firmware Update");
     pageWrite(F("<div class='card'><div class='title'>No New Release</div><p>Current firmware is up to date.</p><p>Current: "));
     pageWrite(current);
@@ -1046,35 +1081,41 @@ static void handleFwCheckUpdate() {
     return;
   }
 
-#if defined(ESP8266)
-  ESPhttpUpdate.rebootOnUpdate(false);
-  WiFiClient client;
-  t_httpUpdate_return result = ESPhttpUpdate.update(client, binUrl, current);
-  bool ok = (result == HTTP_UPDATE_OK);
-#else
-  httpUpdate.rebootOnUpdate(false);
-  WiFiClient client;
-  t_httpUpdate_return result = httpUpdate.update(client, binUrl, current);
-  bool ok = (result == HTTP_UPDATE_OK);
-#endif
+  gPendingUpdateTag = latest;
+  gPendingUpdateUrl = binUrl;
+  pageBegin("Firmware Update");
+  pageWrite(F("<div class='card'><div class='title'>New Release Available</div><p>Current: "));
+  pageWrite(current);
+  pageWrite(F("<br>Latest: "));
+  pageWrite(latest);
+  pageWrite(F("</p><p>Update is ready to install.</p>"
+              "<form method='POST' action='/fw/update'>"
+              "<button type='submit' class='btn'>Install Update</button>"
+              "</form><div class='row' style='margin-top:10px'><a class='btn' href='/fw'>Back</a></div></div>"));
+  pageEnd();
+}
 
-  if (ok) {
+static void handleFwDoUpdate() {
+  if (!gPendingUpdateUrl.length() || !gPendingUpdateTag.length()) {
+    pageBegin("Firmware Update");
+    pageWrite(F("<div class='card'><div class='title'>No Pending Update</div>"
+                "<p>Run <b>Check for Update</b> first.</p><a class='btn' href='/fw'>Back</a></div>"));
+    pageEnd();
+    return;
+  }
+
+  String current = normalizeVersion(String(HA_SW_VERSION));
+  String failReason;
+  if (runOtaFromUrl(gPendingUpdateUrl, current, failReason)) {
     sendRebootingPage("Update Successful",
-                      (String("Installed release ") + latest + ". Rebooting...").c_str(),
+                      (String("Installed release ") + gPendingUpdateTag + ". Rebooting...").c_str(),
                       10, 1200);
     scheduleReboot(1200);
     return;
   }
 
-  String failReason = "Update download/apply failed.";
-#if defined(ESP8266)
-  failReason += String(" ") + ESPhttpUpdate.getLastErrorString();
-#else
-  failReason += String(" ") + httpUpdate.getLastErrorString();
-#endif
-
   pageBegin("Firmware Update");
-  pageWrite(F("<div class='card'><div class='title'>Update Failed</div><p>"));
+  pageWrite(F("<div class='card'><div class='title'>Update Failed</div><p>Update download/apply failed. "));
   pageWrite(failReason);
   pageWrite(F("</p><a class='btn' href='/fw'>Back</a></div>"));
   pageEnd();
@@ -1249,6 +1290,7 @@ void handleRestoreBackupPost() {
     // GET: show form
     server.on("/fw", HTTP_GET, handleFwGet);
     server.on("/fw/check", HTTP_POST, handleFwCheckUpdate);
+    server.on("/fw/update", HTTP_POST, handleFwDoUpdate);
     server.on("/netcheck", HTTP_GET, handleNetCheck);
 
     // POST: upload (note the "upload handler" as 2nd lambda/func)

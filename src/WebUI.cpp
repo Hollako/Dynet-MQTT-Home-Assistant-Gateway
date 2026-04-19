@@ -3,6 +3,7 @@
 #include "MqttManager.h"
 #include "DynetBus.h"
 #include "EntityManager.h"
+#include <errno.h>
 
 // === HTTP server type & Update include ======================================
 #if defined(ESP8266)
@@ -799,7 +800,27 @@ static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, S
   bool ok = client.connect(host, port, timeoutMs);
 #endif
   if (!ok) {
+    const int errNo = errno;
     outErr = String("TCP connect failed to ") + host + ":" + String(port);
+    if (errNo != 0) outErr += String(" errno=") + String(errNo);
+    return false;
+  }
+  client.stop();
+  return true;
+}
+
+static bool hostReachableIp(const IPAddress& ip, uint16_t port, uint32_t timeoutMs, String& outErr) {
+  WiFiClient client;
+  client.setTimeout(timeoutMs / 1000);
+#if defined(ESP8266)
+  bool ok = client.connect(ip, port);
+#else
+  bool ok = client.connect(ip, port, timeoutMs);
+#endif
+  if (!ok) {
+    const int errNo = errno;
+    outErr = String("TCP connect failed to ") + ip.toString() + ":" + String(port);
+    if (errNo != 0) outErr += String(" errno=") + String(errNo);
     return false;
   }
   client.stop();
@@ -813,7 +834,7 @@ static bool resolveHost(const char* host, IPAddress& outIp, String& outErr) {
 }
 
 static void handleNetCheck() {
-  DynamicJsonDocument doc(1536);
+  DynamicJsonDocument doc(3072);
   doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
   doc["sta_ssid"] = WiFi.SSID();
   doc["sta_ip"] = WiFi.localIP().toString();
@@ -848,6 +869,49 @@ static void handleNetCheck() {
   doc["tcp_github_443_ok"] = githubTcp;
   if (!githubTcp) doc["tcp_github_443_err"] = err;
 
+  const String gateway = doc["gateway"].as<String>();
+  err = "";
+  bool gateway80 = hostReachable(gateway.c_str(), 80, 3000, err);
+  doc["tcp_gateway_80_ok"] = gateway80;
+  if (!gateway80) doc["tcp_gateway_80_err"] = err;
+
+  err = "";
+  bool gateway53 = hostReachable(gateway.c_str(), 53, 3000, err);
+  doc["tcp_gateway_53_ok"] = gateway53;
+  if (!gateway53) doc["tcp_gateway_53_err"] = err;
+
+  err = "";
+  bool githubIpTcp = hostReachable("140.82.121.5", 443, 5000, err);
+  doc["tcp_github_ip_443_ok"] = githubIpTcp;
+  if (!githubIpTcp) doc["tcp_github_ip_443_err"] = err;
+
+  err = "";
+  bool example80 = hostReachable("example.com", 80, 5000, err);
+  doc["tcp_example_80_ok"] = example80;
+  if (!example80) doc["tcp_example_80_err"] = err;
+
+  err = "";
+  IPAddress githubV4Ip;
+  bool githubV4Dns = resolveHost("api.github.com", githubV4Ip, err);
+  doc["dns_github_ipv4_ok"] = githubV4Dns;
+  doc["dns_github_ipv4_ip"] = githubV4Dns ? githubV4Ip.toString() : "";
+  if (!githubV4Dns) doc["dns_github_ipv4_err"] = err;
+
+  bool githubV4Tcp = false;
+  err = "";
+  if (githubV4Dns) {
+    githubV4Tcp = hostReachableIp(githubV4Ip, 443, 5000, err);
+  } else {
+    err = "Skipped IPv4-only TCP check because DNS resolution failed.";
+  }
+  doc["tcp_github_ipv4_443_ok"] = githubV4Tcp;
+  if (!githubV4Tcp) doc["tcp_github_ipv4_443_err"] = err;
+
+#if defined(ESP32) || defined(ESP8266)
+  doc["free_heap"] = ESP.getFreeHeap();
+#endif
+  doc["open_sockets_info"] = "Runtime open socket count is not exposed by Arduino WiFiClient API.";
+
   String dnsGoogleErr = String(doc["dns_google_err"] | "");
   String dnsGithubErr = String(doc["dns_github_err"] | "");
   String tcpGoogleErr = String(doc["tcp_google_443_err"] | "");
@@ -856,6 +920,11 @@ static void handleNetCheck() {
   String dnsGithubSuffix = githubDns ? "" : String(" err=") + dnsGithubErr;
   String tcpGoogleSuffix = googleTcp ? "" : String(" err=") + tcpGoogleErr;
   String tcpGithubSuffix = githubTcp ? "" : String(" err=") + tcpGithubErr;
+  String tcpGateway80Suffix = gateway80 ? "" : String(" err=") + String(doc["tcp_gateway_80_err"] | "");
+  String tcpGateway53Suffix = gateway53 ? "" : String(" err=") + String(doc["tcp_gateway_53_err"] | "");
+  String tcpGithubIpSuffix = githubIpTcp ? "" : String(" err=") + String(doc["tcp_github_ip_443_err"] | "");
+  String tcpExample80Suffix = example80 ? "" : String(" err=") + String(doc["tcp_example_80_err"] | "");
+  String tcpGithubV4Suffix = githubV4Tcp ? "" : String(" err=") + String(doc["tcp_github_ipv4_443_err"] | "");
 
   LOGF("[NETCHECK] wifi=%s ssid='%s' ip=%s gw=%s dns1=%s\n",
        doc["wifi_connected"].as<bool>() ? "ok" : "down",
@@ -877,6 +946,21 @@ static void handleNetCheck() {
   LOGF("[NETCHECK] tcp api.github.com:443=%s%s\n",
        githubTcp ? "ok" : "fail",
        tcpGithubSuffix.c_str());
+  LOGF("[NETCHECK] tcp gateway:80=%s%s\n",
+       gateway80 ? "ok" : "fail",
+       tcpGateway80Suffix.c_str());
+  LOGF("[NETCHECK] tcp gateway:53=%s%s\n",
+       gateway53 ? "ok" : "fail",
+       tcpGateway53Suffix.c_str());
+  LOGF("[NETCHECK] tcp github-ip:443=%s%s\n",
+       githubIpTcp ? "ok" : "fail",
+       tcpGithubIpSuffix.c_str());
+  LOGF("[NETCHECK] tcp example.com:80=%s%s\n",
+       example80 ? "ok" : "fail",
+       tcpExample80Suffix.c_str());
+  LOGF("[NETCHECK] tcp api.github.com(v4):443=%s%s\n",
+       githubV4Tcp ? "ok" : "fail",
+       tcpGithubV4Suffix.c_str());
 
   server.sendHeader("Cache-Control", "no-store");
   String out;

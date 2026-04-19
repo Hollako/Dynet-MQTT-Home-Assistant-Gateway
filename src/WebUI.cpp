@@ -818,20 +818,59 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
   return true;
 }
 
+#if defined(ESP8266)
+// ESP8266 WiFiClientSecure doesn't cleanly re-handshake after stop()+connect()
+// to a different host. Following a 302 redirect inside ESPhttpUpdate triggers
+// exactly that path and corrupts BearSSL state → "connection lost".
+// Fix: resolve the redirect URL up-front with a HEAD request so ESPhttpUpdate
+// gets a direct CDN URL and never needs to follow a redirect.
+static String resolveRedirectUrl(const String& url, String& outErr) {
+  WiFiClientSecure c;
+  c.setTimeout(10000);
+  c.setInsecure();
+  c.setBufferSizes(1024, 512);
+  HTTPClient http;
+  const char* hdrs[] = {"Location"};
+  http.collectHeaders(hdrs, 1);
+  if (!http.begin(c, url)) { outErr = "Redirect resolve: begin failed"; return ""; }
+  int code = http.sendRequest("HEAD");
+  String loc = http.header("Location");
+  http.end();
+  if (code == 200) return url;
+  if ((code == 301 || code == 302 || code == 307 || code == 308) && loc.length() > 0) return loc;
+  outErr = "Redirect resolve: unexpected HTTP " + String(code);
+  return "";
+}
+#endif
+
 static bool runOtaFromUrl(const String& binUrl, const String& currentVersion, String& outErr) {
-  // Use TLS for the actual firmware download — GitHub release assets
-  // (objects.githubusercontent.com) share the same root CA as api.github.com.
   if (!checkHeapForTls(outErr)) return false;
-  WiFiClientSecure secureClient;
-  configureGithubTls(secureClient);
 
 #if defined(ESP8266)
+  // Resolve redirect first so ESPhttpUpdate connects directly to the CDN — no
+  // mid-download host switch, no BearSSL state corruption.
+  String finalUrl = resolveRedirectUrl(binUrl, outErr);
+  if (finalUrl.isEmpty()) return false;
+
+  WiFiClientSecure secureClient;
+  secureClient.setTimeout(60000);
+  secureClient.setInsecure();
+  secureClient.setBufferSizes(4096, 512);
+
   ESPhttpUpdate.rebootOnUpdate(false);
-  t_httpUpdate_return result = ESPhttpUpdate.update(secureClient, binUrl, currentVersion);
+  ESPhttpUpdate.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+  t_httpUpdate_return result = ESPhttpUpdate.update(secureClient, finalUrl, currentVersion);
   if (result == HTTP_UPDATE_OK) return true;
   outErr = ESPhttpUpdate.getLastErrorString();
 #else
+  WiFiClientSecure secureClient;
+  secureClient.setTimeout(60000);
+  {
+    static const String combinedCA = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
+    secureClient.setCACert(combinedCA.c_str());
+  }
   httpUpdate.rebootOnUpdate(false);
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   t_httpUpdate_return result = httpUpdate.update(secureClient, binUrl, currentVersion);
   if (result == HTTP_UPDATE_OK) return true;
   outErr = httpUpdate.getLastErrorString();

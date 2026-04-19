@@ -7,6 +7,18 @@ static const unsigned long STA_CONNECT_GRACE = 4000;
 static const unsigned long STA_RETRY_INTERVAL = 6000;
 static const uint8_t       MAX_STA_RETRY      = 5;
 
+static void logStaNetworkInfo() {
+  LOGF("[NET] IP: %s\n", WiFi.localIP().toString().c_str());
+  LOGF("[NET] Subnet: %s\n", WiFi.subnetMask().toString().c_str());
+  LOGF("[NET] Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
+#if defined(ESP8266)
+  LOGF("[NET] DNS: %s\n", WiFi.dnsIP().toString().c_str());
+#else
+  LOGF("[NET] DNS1: %s\n", WiFi.dnsIP(0).toString().c_str());
+  LOGF("[NET] DNS2: %s\n", WiFi.dnsIP(1).toString().c_str());
+#endif
+}
+
 const char* reasonToStr(uint8_t r) {
   switch (r) {
     case 1:  return "UNSPECIFIED"; case 2:  return "AUTH_EXPIRE"; case 3:  return "AUTH_LEAVE";
@@ -87,8 +99,8 @@ void updateWiFiSM() {
     // STA connected → turn AP OFF immediately
     if (apActive) {
       stopAP();
-      Serial.println("[NET] STA connected -> AP OFF");
-      Serial.printf("[IP] IP: %s\n", WiFi.localIP().toString().c_str());
+      LOGLN("[NET] STA connected -> AP OFF");
+      logStaNetworkInfo();
     }
     staBusy = false;
     staRetries = 0;
@@ -133,8 +145,9 @@ void installWiFiDebugHandlers() {
     lastStaChangeMs = millis();
     staBusy = false;  // success
     staRetries = 0;   // reset retries
-    Serial.printf("[WIFI] %s gw=%s mask=%s rssi=%d dBm\n",
+    LOGF("[WIFI] %s gw=%s mask=%s rssi=%d dBm\n",
       staLastEvent.c_str(), ev.gw.toString().c_str(), ev.mask.toString().c_str(), WiFi.RSSI());
+    logStaNetworkInfo();
   });
 
   WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& ev){
@@ -181,11 +194,12 @@ void installWiFiDebugHandlers() {
       lastStaChangeMs = millis();
       staBusy = false;  // success
       staRetries = 0;   // reset retries
-      Serial.printf("[WIFI] %s gw=%s mask=%s rssi=%d dBm\n",
+      LOGF("[WIFI] %s gw=%s mask=%s rssi=%d dBm\n",
         staLastEvent.c_str(),
         WiFi.gatewayIP().toString().c_str(),
         WiFi.subnetMask().toString().c_str(),
         WiFi.RSSI());
+      logStaNetworkInfo();
       return;
     }
 
@@ -215,4 +229,3 @@ void wifiSetup() {
 }
 
 void wifiLoop()  { updateWiFiSM(); }
-

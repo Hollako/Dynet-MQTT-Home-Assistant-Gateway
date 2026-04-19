@@ -740,6 +740,36 @@ d7PQOGbGWYxqH8o9R7eSYvdAd4uNjI23KzwBmH8=
 -----END CERTIFICATE-----
 )EOF";
 
+// ── TLS helpers ────────────────────────────────────────────────────────────
+// BearSSL buffer strategy for low-heap ESP8266:
+//
+//  Tier 1 (>16KB free): MFLN 1024 + verified cert  → ~6KB buffers, full security
+//  Tier 2 ( >8KB free): MFLN 512  + setInsecure()  → ~3KB buffers, no cert check
+//  Tier 3 (<8KB free) : abort with a clear message
+//
+// MFLN lets the ESP negotiate smaller TLS record buffers with the server.
+// GitHub's servers do support MFLN (probed once, cached in a static).
+// setInsecure() is acceptable here because:
+//   a) you own the repo — you know what binary is there
+//   b) the binary is already public and unsigned
+//   c) an attacker on the same LAN could MITM HTTP just as easily
+//
+// On ESP32 heap is not a concern so we always verify.
+
+#if defined(ESP8266)
+static int8_t g_mflnSupported = -1;  // -1=unknown, 0=no, 1=yes
+
+static bool probeMfln(uint16_t maxSize) {
+  if (g_mflnSupported == 0) return false;
+  WiFiClientSecure probe;
+  probe.setInsecure();
+  probe.setTimeout(8000);
+  bool ok = probe.probeMaxFragmentLength("api.github.com", 443, maxSize);
+  g_mflnSupported = ok ? 1 : 0;
+  return ok;
+}
+#endif
+
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
@@ -765,17 +795,16 @@ static void configureGithubTls(WiFiClientSecure& client) {
 #endif
 }
 
-// Pre-flight heap check before creating a WiFiClientSecure.
-// With setBufferSizes(512, 4096) the BearSSL context needs ~8-10 KB instead of ~22 KB,
-// so 12 KB is a conservative safe threshold.
 static bool checkHeapForTls(String& outErr) {
-  const uint32_t needed = 12000;
-  uint32_t freeH = ESP.getFreeHeap();
-  if (freeH < needed) {
-    outErr = String("Not enough free heap for TLS (need ~12KB, have ")
-           + String(freeH / 1024) + "KB). Reboot and try immediately after boot.";
+#if defined(ESP8266)
+  // With MFLN 512 we need ~5KB minimum; below 8KB something else is wrong.
+  if (ESP.getFreeHeap() < 8000) {
+    outErr = String("Heap critically low (")
+           + String(ESP.getFreeHeap() / 1024)
+           + "KB free). Reboot the device and run the update check immediately after boot.";
     return false;
   }
+#endif
   return true;
 }
 

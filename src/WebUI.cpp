@@ -642,8 +642,35 @@ static int compareVersion(const String& aRaw, const String& bRaw) {
   return 0;
 }
 
+static bool parseLatestReleaseFromHtml(const String& html, String& outTag, String& outBinUrl) {
+  const String marker = "/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/download/";
+  int pos = html.indexOf(marker);
+  while (pos >= 0) {
+    int tagStart = pos + marker.length();
+    int tagEnd = html.indexOf('/', tagStart);
+    if (tagEnd <= tagStart) break;
+
+    int fileStart = tagEnd + 1;
+    int fileEnd = html.indexOf('"', fileStart);
+    if (fileEnd <= fileStart) {
+      pos = html.indexOf(marker, pos + 1);
+      continue;
+    }
+
+    String filename = html.substring(fileStart, fileEnd);
+    if (filename.endsWith(".bin")) {
+      outTag = html.substring(tagStart, tagEnd);
+      outBinUrl = String("https://github.com") + marker + outTag + "/" + filename;
+      return true;
+    }
+    pos = html.indexOf(marker, pos + 1);
+  }
+  return false;
+}
+
 static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {
   const char* latestApiUrl = "https://api.github.com/repos/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
+  const char* latestHtmlUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
 
   if (WiFi.status() != WL_CONNECTED) {
     outErr = "Wi-Fi station is not connected to the internet. Connect STA Wi-Fi first, then retry update check.";
@@ -660,28 +687,48 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
   http.addHeader("User-Agent", "dynet-gateway-ota");
 
   int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    outErr = String("GitHub API request failed (HTTP ") + code + "): " + HTTPClient::errorToString(code) + ".";
+  if (code == HTTP_CODE_OK) {
+    DynamicJsonDocument doc(16384);
+    DeserializationError jerr = deserializeJson(doc, http.getStream());
     http.end();
-    return false;
-  }
+    if (jerr) {
+      outErr = "Invalid JSON from GitHub.";
+      return false;
+    }
 
-  DynamicJsonDocument doc(16384);
-  DeserializationError jerr = deserializeJson(doc, http.getStream());
-  http.end();
-  if (jerr) {
-    outErr = "Invalid JSON from GitHub.";
-    return false;
-  }
+    outTag = doc["tag_name"] | "";
+    JsonArray assets = doc["assets"].as<JsonArray>();
+    for (JsonVariant v : assets) {
+      const char* name = v["name"] | "";
+      const char* url  = v["browser_download_url"] | "";
+      if (name && url && String(name).endsWith(".bin")) {
+        outBinUrl = String(url);
+        break;
+      }
+    }
+  } else {
+    String apiErr = String("GitHub API request failed (HTTP ") + code + "): " + HTTPClient::errorToString(code) + ".";
+    http.end();
 
-  outTag = doc["tag_name"] | "";
-  JsonArray assets = doc["assets"].as<JsonArray>();
-  for (JsonVariant v : assets) {
-    const char* name = v["name"] | "";
-    const char* url  = v["browser_download_url"] | "";
-    if (name && url && String(name).endsWith(".bin")) {
-      outBinUrl = String(url);
-      break;
+    // Fallback for environments where api.github.com is blocked/unreachable.
+    HTTPClient htmlHttp;
+    WiFiClientSecure htmlClient;
+    htmlClient.setInsecure();
+    htmlHttp.setTimeout(12000);
+    htmlHttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    htmlHttp.begin(htmlClient, latestHtmlUrl);
+    htmlHttp.addHeader("User-Agent", "dynet-gateway-ota");
+    int htmlCode = htmlHttp.GET();
+    if (htmlCode != HTTP_CODE_OK) {
+      outErr = apiErr + " Fallback page request failed (HTTP " + String(htmlCode) + "): " + HTTPClient::errorToString(htmlCode) + ".";
+      htmlHttp.end();
+      return false;
+    }
+    String html = htmlHttp.getString();
+    htmlHttp.end();
+    if (!parseLatestReleaseFromHtml(html, outTag, outBinUrl)) {
+      outErr = apiErr + " Fallback parse failed (no .bin release asset found).";
+      return false;
     }
   }
 

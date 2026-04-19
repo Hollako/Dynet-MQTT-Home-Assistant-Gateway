@@ -697,7 +697,12 @@ CAUw7C29C79Fv1C5qfPrmAESrciIxpg0X40KPMbp1ZWVbd4=
 
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
+#if defined(ESP8266)
+  static BearSSL::X509List cert(kGithubRootCA);
+  client.setTrustAnchors(&cert);
+#else
   client.setCACert(kGithubRootCA);
+#endif
 }
 
 static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {

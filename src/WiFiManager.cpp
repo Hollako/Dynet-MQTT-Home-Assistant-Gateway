@@ -28,9 +28,14 @@ static void logStaNetworkInfo() {
 }
 
 static bool ntpSynced = false;
+static unsigned long nextNtpRetryAt = 0;
+static const unsigned long NTP_RETRY_INTERVAL_MS = 30000;
 
 static void syncNtpTime() {
-  if (ntpSynced) return;
+  if (ntpSynced) {
+    LOGF("[NTP] Already synced (epoch=%lu)\n", (unsigned long)time(nullptr));
+    return;
+  }
 
   LOGLN("[NTP] Starting time sync with pool.ntp.org/time.nist.gov");
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -45,6 +50,7 @@ static void syncNtpTime() {
 
   if (now >= 100000) {
     ntpSynced = true;
+    nextNtpRetryAt = 0;
     struct tm* utc = gmtime(&now);
     char ts[32] = {0};
     if (utc && strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S UTC", utc) > 0) {
@@ -55,6 +61,8 @@ static void syncNtpTime() {
     }
   } else {
     LOGF("[NTP] Sync failed after %u attempts (epoch=%lu)\n", attempts, (unsigned long)now);
+    nextNtpRetryAt = millis() + NTP_RETRY_INTERVAL_MS;
+    LOGF("[NTP] Next retry in %lu ms\n", (unsigned long)NTP_RETRY_INTERVAL_MS);
   }
 }
 
@@ -142,6 +150,10 @@ void updateWiFiSM() {
     }
     staBusy = false;
     staRetries = 0;
+    if (!ntpSynced && (nextNtpRetryAt == 0 || millis() >= nextNtpRetryAt)) {
+      LOGF("[NTP] Triggering sync from wifiLoop() (connected, retryAt=%lu)\n", nextNtpRetryAt);
+      syncNtpTime();
+    }
     return;
   }
 
@@ -196,6 +208,8 @@ void installWiFiDebugHandlers() {
                  + " (" + String(ev.reason) + ")";
     lastStaChangeMs = millis();
     staBusy = false;
+    ntpSynced = false;
+    nextNtpRetryAt = 0;
 
     const bool manualLeave = (ev.reason == 8);  // ASSOC_LEAVE
     if (!manualLeave) bumpStaRetries();
@@ -250,6 +264,8 @@ void installWiFiDebugHandlers() {
                   + " (" + String(staDiscReason) + ")";
       lastStaChangeMs = millis();
       staBusy = false;
+      ntpSynced = false;
+      nextNtpRetryAt = 0;
 
       const bool manualLeave = (staDiscReason == 8);  // ASSOC_LEAVE
       if (!manualLeave) bumpStaRetries();

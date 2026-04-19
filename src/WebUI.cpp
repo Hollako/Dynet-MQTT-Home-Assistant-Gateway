@@ -773,23 +773,33 @@ static bool probeMfln(uint16_t maxSize) {
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
-  // Shrink TLS I/O buffers: default RX is 16 384 bytes — the biggest single heap
-  // allocation in the TLS stack on ESP8266.  4 096 bytes is enough because GitHub's
-  // servers send TLS records well within that limit, and BearSSL reassembles records
-  // across multiple reads automatically.  This saves ~12 KB of heap.
-  client.setBufferSizes(512, 4096);
-
-  // Built lazily once via a pointer; append() must NOT run on every call or the
-  // list grows on repeated OTA checks, leaking heap and BearSSL parse state.
-  static BearSSL::X509List* certBundle = nullptr;
-  if (!certBundle) {
-    certBundle = new BearSSL::X509List(kGithubRootCA_DigiCertG2);
-    certBundle->append(kGithubRootCA_ISRG_X1);
+  // setBufferSizes(recv, xmit) — recv is the FIRST argument.
+  //
+  // Without MFLN, the server chooses TLS record sizes freely (up to 16 384 bytes).
+  // GitHub's Certificate record is typically 3-5 KB, so recv=512 (our previous value)
+  // cannot hold it → TLS handshake silently fails → HTTP -1.
+  //
+  // With MFLN negotiated the server caps every record at our requested size (512 bytes),
+  // so a recv buffer of 1024 bytes (512 + TLS overhead) is sufficient.
+  //
+  // probeMfln() uses a raw TCP probe — it does NOT allocate BearSSL I/O buffers,
+  // so heap cost is minimal (~1 KB for the socket).  Result is cached in a static.
+  if (probeMfln(512)) {
+    client.setMFLN(512);
+    client.setBufferSizes(1024, 512); // recv=1024 (512 + overhead), xmit=512 — ~1.5 KB total
+    static BearSSL::X509List* certBundle = nullptr;
+    if (!certBundle) {
+      certBundle = new BearSSL::X509List(kGithubRootCA_DigiCertG2);
+      certBundle->append(kGithubRootCA_ISRG_X1);
+    }
+    client.setTrustAnchors(certBundle);
+  } else {
+    // MFLN not supported (rare for GitHub) — need recv large enough for the
+    // Certificate record.  Skip cert verification to save X509List heap overhead.
+    client.setBufferSizes(4096, 512); // recv=4096, xmit=512 — saves ~12 KB vs default
+    client.setInsecure();
   }
-  client.setTrustAnchors(certBundle);
 #else
-  // mbedTLS parses all PEM certs in the buffer.
-  // Static so the concatenated string is built only once.
   static const String combinedCA = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
   client.setCACert(combinedCA.c_str());
 #endif

@@ -30,6 +30,7 @@ extern HttpServer server;
 static void handleFwGet();
 static void handleFwUpload();
 static void handleFwCheckUpdate();
+static void handleNetCheck();
 
 // Expose the route registrar (Call this from registerWebRoutes)
 void registerFwRoutes();
@@ -789,6 +790,65 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
   return true;
 }
 
+static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, String& outErr) {
+  WiFiClient client;
+  client.setTimeout(timeoutMs / 1000);
+  if (!client.connect(host, port, timeoutMs)) {
+    outErr = String("TCP connect failed to ") + host + ":" + String(port);
+    return false;
+  }
+  client.stop();
+  return true;
+}
+
+static bool resolveHost(const char* host, IPAddress& outIp, String& outErr) {
+  if (WiFi.hostByName(host, outIp)) return true;
+  outErr = String("DNS resolve failed for ") + host;
+  return false;
+}
+
+static void handleNetCheck() {
+  DynamicJsonDocument doc(1536);
+  doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+  doc["sta_ssid"] = WiFi.SSID();
+  doc["sta_ip"] = WiFi.localIP().toString();
+  doc["gateway"] = WiFi.gatewayIP().toString();
+#if defined(ESP8266)
+  doc["dns1"] = WiFi.dnsIP().toString();
+#else
+  doc["dns1"] = WiFi.dnsIP(0).toString();
+  doc["dns2"] = WiFi.dnsIP(1).toString();
+#endif
+
+  String err;
+  IPAddress ip;
+  bool googleDns = resolveHost("google.com", ip, err);
+  doc["dns_google_ok"] = googleDns;
+  doc["dns_google_ip"] = googleDns ? ip.toString() : "";
+  if (!googleDns) doc["dns_google_err"] = err;
+
+  err = "";
+  bool githubDns = resolveHost("api.github.com", ip, err);
+  doc["dns_github_ok"] = githubDns;
+  doc["dns_github_ip"] = githubDns ? ip.toString() : "";
+  if (!githubDns) doc["dns_github_err"] = err;
+
+  err = "";
+  bool googleTcp = hostReachable("google.com", 443, 5000, err);
+  doc["tcp_google_443_ok"] = googleTcp;
+  if (!googleTcp) doc["tcp_google_443_err"] = err;
+
+  err = "";
+  bool githubTcp = hostReachable("api.github.com", 443, 5000, err);
+  doc["tcp_github_443_ok"] = githubTcp;
+  if (!githubTcp) doc["tcp_github_443_err"] = err;
+
+  server.sendHeader("Cache-Control", "no-store");
+  String out;
+  serializeJsonPretty(doc, out);
+  server.send(200, "application/json", out);
+}
+
 static void handleFwGet() {
   const char* otaReleaseUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
   pageBegin("Firmware Update");
@@ -814,6 +874,9 @@ static void handleFwGet() {
                 "<button type='submit' class='btn'>Check for Update</button>"
               "</div>"
               "</form>"
+              "<div class='row' style='margin-top:10px'>"
+                "<a class='btn' href='/netcheck' target='_blank' rel='noopener'>Run Internet Check</a>"
+              "</div>"
               "<div class='field' style='margin-top:16px'>"
                 "<label>OTA URL (GitHub release)</label>"
                 "<input type='text' class='in wide' readonly value='"));
@@ -1067,6 +1130,7 @@ void handleRestoreBackupPost() {
     // GET: show form
     server.on("/fw", HTTP_GET, handleFwGet);
     server.on("/fw/check", HTTP_POST, handleFwCheckUpdate);
+    server.on("/netcheck", HTTP_GET, handleNetCheck);
 
     // POST: upload (note the "upload handler" as 2nd lambda/func)
     server.on("/fw", HTTP_POST,

@@ -814,7 +814,8 @@ static String gPendingUpdateUrl;
 
 static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, String& outErr) {
   WiFiClient client;
-  client.setTimeout(timeoutMs / 1000);
+  // Stream/WiFiClient timeout is in milliseconds; keep the caller-provided value.
+  client.setTimeout(timeoutMs);
 #if defined(ESP8266)
   bool ok = client.connect(host, port);
 #else
@@ -832,7 +833,8 @@ static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, S
 
 static bool hostReachableIp(const IPAddress& ip, uint16_t port, uint32_t timeoutMs, String& outErr) {
   WiFiClient client;
-  client.setTimeout(timeoutMs / 1000);
+  // Stream/WiFiClient timeout is in milliseconds; keep the caller-provided value.
+  client.setTimeout(timeoutMs);
 #if defined(ESP8266)
   bool ok = client.connect(ip, port);
 #else

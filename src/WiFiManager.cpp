@@ -45,7 +45,14 @@ static void syncNtpTime() {
 
   if (now >= 100000) {
     ntpSynced = true;
-    LOGF("[NTP] Sync OK epoch=%lu after %u attempts\n", (unsigned long)now, attempts);
+    struct tm* utc = gmtime(&now);
+    char ts[32] = {0};
+    if (utc && strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S UTC", utc) > 0) {
+      LOGF("[NTP] Sync OK epoch=%lu after %u attempts\n", (unsigned long)now, attempts);
+      LOGF("[NTP] Current UTC time: %s\n", ts);
+    } else {
+      LOGF("[NTP] Sync OK epoch=%lu after %u attempts (time format failed)\n", (unsigned long)now, attempts);
+    }
   } else {
     LOGF("[NTP] Sync failed after %u attempts (epoch=%lu)\n", attempts, (unsigned long)now);
   }

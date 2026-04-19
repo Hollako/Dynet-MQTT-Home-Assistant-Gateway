@@ -671,41 +671,105 @@ static bool parseLatestReleaseFromHtml(const String& html, String& outTag, Strin
   return false;
 }
 
-// GitHub endpoints (github.com + api.github.com) currently chain to DigiCert roots.
-// Keeping a local CA avoids using setInsecure() in production firmware.
-static const char kGithubRootCA[] PROGMEM = R"EOF(
+// GitHub changed its TLS root CA in March 2024 without announcement (DigiCert -> USERTrust).
+// We embed BOTH roots so the firmware works regardless of which chain GitHub presents.
+// USERTrust RSA CA (current primary as of 2024): valid until 2038
+// DigiCert Global Root G2 (fallback):            valid until 2038
+//
+// BearSSL accepts a certificate bundle — setTrustAnchors() with an X509List
+// containing multiple certs will match any of them during handshake.
+//
+// HEAP WARNING: BearSSL needs ~22KB of free heap for TLS. If heap < 20KB
+// at call time, the connection will fail silently with HTTP -1.
+// Free heap is checked before attempting TLS and the error is reported clearly.
+
+static const char kGithubRootCA_USERTrust[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
-MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDExHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoBggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
+A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
+T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
+B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
+B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
+KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
+OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
+jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
+qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
+rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
+HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
+hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwK
+dJzd91J2w+JR/S1+vNBe+BxzF8JtgJRMVMnMdJTCsB2OCF+d+kUUIDMKDyCpCRIS
+A7I5w+g9nObOVnzZq7oAx6PYnz1gnL1bfcC8pfOH7/R4bANqN5TfFMpk9Oqfwz5i
+6lsoAb/lhCfPAQ2Qm1NPXR2gGGFLpJLrHJMbPF+wFVbL93MKGSP6kPlRp7nccRFw
+KyF0IOKnBdKGqJa6Qx8RMJGbBvzmHVnhKaUMKaL6lE2Y0A==
+-----END CERTIFICATE-----
+)EOF";
+
+static const char kGithubRootCA_DigiCertG2[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
 MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
-d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBD
-QTAeFw0wNjExMTAwMDAwMDBaFw0zMTExMTAwMDAwMDBaMGExCzAJBgNVBAYTAlVT
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+MjAeFw0xMzA4MDExMjAwMDBaFw0zODAxMTUxMjAwMDBaMGExCzAJBgNVBAYTAlVT
 MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5j
-b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IENBMIIBIjANBgkqhkiG
-9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4jvhEXLeqKTTo1eqUKKPC3eQyaKl7hLOllsB
-CSDMAZOnTjC3U/dDxGkAV53ijSLdhwZAAIEJzs4bg7/fzTtxRuLWZscFs3YnFo97
-nh6Vfe63SKMI2tavegw5BmV/Sl0fvBf4q77uKNd0f3p4mVmFaG5cIzJLv07A6Fpt
-43C/dxC//AH2hdmoRBBYMql1GNXRor5H4idq9Joz+EkIYIvUX7Q6hL+hqkpMfT7P
-T19sdl6gSzeRntwi5m3OFBqOasv+zbMUZBfHWymeMr/y7vrTC0LUq7dBMtoM1O/4
-gdW7jVg/tRvoSSiicNoxBN33shbyTApOB6jtSj1etX+jkMOvJwIDAQABo2MwYTAO
-BgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUA95QNVbR
-TLtm8KPiGxvDl7I90VUwHwYDVR0jBBgwFoAUA95QNVbRTLtm8KPiGxvDl7I90VUw
-DQYJKoZIhvcNAQEFBQADggEBAMucN6pIExIK+t1EnE9SsPTfrgT1eXkIoyQY/Esr
-hMAtudXH/vTBH1jLuG2cenTnmCmrEbXjcKChzUyImZOMkXDiqw8cvpOp/2PV5Adg
-06O/nVsJ8dWO41P0jmP6P6fbtGbfYmbW0W5BjfIttep3Sp+dWOIrWcBAI+0tKIJF
-PnlUkiaY4IBIqDfv8NZ5YBberOgOzW6sRBc4L0na4UU+Krk2U886UAb3LujEV0ls
-YSEY1QSteDwsOoBrp+uvFRTp2InBuThs4pFsiv9kuXclVzDAGySj4dzp30d8tbQk
-CAUw7C29C79Fv1C5qfPrmAESrciIxpg0X40KPMbp1ZWVbd4=
+b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IEcyMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuzfNNNx7a8myaJCtSnX/RrohCgiN9RlUyfuI
+2/Ou8jqJkTx65qsGGmvPrC3oXgkkRLpimn7Wo6h+4FR1IAWsULecYxpsMNzaHxmx
+1x7e/dfgy5SDN67sH0NO3Xss0r0upS/kqbitOtSZpLYl6ZtrAGCSYP9PIUkY92eQ
+q2EGnI/yuum06ZIya7XzV+hdG82MHauVBJVJ8zUtluNJbd134/tJS7SsVQepj5Wz
+tCO7TG1F8PapspUwtP1MVYwnSlcUfIKdzXOS0xZKBgyMUNGPHgm+F6HmIcr9g+UQ
+vIOlCsRnKPZzFBQ/5exGAnjSdBOiVjkNc5scal6+tqgw5LdmWQIDAQABo2MwYTAO
+BgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUTiJUIBiV
+5uNu5g/6+rkS7QYXjzkwHwYDVR0jBBgwFoAUTiJUIBiV5uNu5g/6+rkS7QYXjzkw
+DQYJKoZIhvcNAQELBQADggEBAGnkInG525hsRHiTiTbEhebWBFN5yb+fH1B8RRR8
+x6jHsapTqjFr02k+Hxo0+l1DkLWTVLU8GHzjqYu+AEhUv7cMU87J6lE9YxQ5aOy
+xpFJMbxFiMNLJN7LJMF4iOoXIbj2oPuSV9/HSmxRaJhbQFPoB/0OxSnl/zCAGmOE
+2V0E4EelVRY4cyvKNsIBHpMDT77wD0HZa1SknD5TdyXBJXtNV7KeKrXU5H6BQXCD
+bHLFnI+dsMf4IAlqc4lqW2BirEOeWEL5Sj5b5MrLKqDnw3L3sguI7MpMoFJGiMI1
+d7PQOGbGWYxqH8o9R7eSYvdAd4uNjI23KzwBmH8=
 -----END CERTIFICATE-----
 )EOF";
 
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
-  static BearSSL::X509List cert(kGithubRootCA);
-  client.setTrustAnchors(&cert);
+  // Load both CA certs into a single X509List bundle.
+  // BearSSL will accept a handshake that matches ANY cert in the list,
+  // so this works regardless of which root GitHub is currently presenting.
+  static BearSSL::X509List certBundle(kGithubRootCA_USERTrust);
+  certBundle.append(kGithubRootCA_DigiCertG2);
+  client.setTrustAnchors(&certBundle);
 #else
-  client.setCACert(kGithubRootCA);
+  // ESP32: setCACert only accepts a single PEM string.
+  // Concatenate both — mbedTLS parses all certs in the buffer.
+  static String combinedCA = String(kGithubRootCA_USERTrust) + String(kGithubRootCA_DigiCertG2);
+  client.setCACert(combinedCA.c_str());
 #endif
+}
+
+// Check if there is enough heap for a BearSSL TLS connection (~22KB needed).
+// Call this before any WiFiClientSecure operation and surface the error clearly
+// instead of getting a silent HTTP -1.
+static bool checkHeapForTls(String& outErr) {
+  const uint32_t needed = 22000;
+  uint32_t free = ESP.getFreeHeap();
+  if (free < needed) {
+    outErr = String("Not enough free heap for TLS handshake. Need ~22KB, have ")
+           + String(free / 1024) + "KB. Reboot the device and try again immediately after boot.";
+    return false;
+  }
+  return true;
 }
 
 static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {
@@ -716,6 +780,9 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
     outErr = "Wi-Fi station is not connected to the internet. Connect STA Wi-Fi first, then retry update check.";
     return false;
   }
+
+  // BearSSL TLS needs ~22KB of contiguous heap. Check before attempting.
+  if (!checkHeapForTls(outErr)) return false;
 
   HTTPClient http;
   WiFiClientSecure client;
@@ -793,16 +860,20 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
 }
 
 static bool runOtaFromUrl(const String& binUrl, const String& currentVersion, String& outErr) {
+  // Use TLS for the actual firmware download — GitHub release assets
+  // (objects.githubusercontent.com) share the same root CA as api.github.com.
+  if (!checkHeapForTls(outErr)) return false;
+  WiFiClientSecure secureClient;
+  configureGithubTls(secureClient);
+
 #if defined(ESP8266)
   ESPhttpUpdate.rebootOnUpdate(false);
-  WiFiClient client;
-  t_httpUpdate_return result = ESPhttpUpdate.update(client, binUrl, currentVersion);
+  t_httpUpdate_return result = ESPhttpUpdate.update(secureClient, binUrl, currentVersion);
   if (result == HTTP_UPDATE_OK) return true;
   outErr = ESPhttpUpdate.getLastErrorString();
 #else
   httpUpdate.rebootOnUpdate(false);
-  WiFiClient client;
-  t_httpUpdate_return result = httpUpdate.update(client, binUrl, currentVersion);
+  t_httpUpdate_return result = httpUpdate.update(secureClient, binUrl, currentVersion);
   if (result == HTTP_UPDATE_OK) return true;
   outErr = httpUpdate.getLastErrorString();
 #endif

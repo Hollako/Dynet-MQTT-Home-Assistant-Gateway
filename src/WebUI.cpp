@@ -671,19 +671,18 @@ static bool parseLatestReleaseFromHtml(const String& html, String& outTag, Strin
   return false;
 }
 
-// GitHub changed its TLS root CA in March 2024 without announcement (DigiCert -> USERTrust).
-// We embed BOTH roots so the firmware works regardless of which chain GitHub presents.
-// USERTrust RSA CA (current primary as of 2024): valid until 2038
-// DigiCert Global Root G2 (fallback):            valid until 2038
+// GitHub uses a DigiCert certificate chain. We embed DigiCert Global Root G2 (valid until 2038)
+// plus ISRG Root X1 (Let's Encrypt, valid until 2035) as a fallback for GitHub's CDN/asset hosts.
 //
-// BearSSL accepts a certificate bundle — setTrustAnchors() with an X509List
-// containing multiple certs will match any of them during handshake.
+// HEAP WARNING: BearSSL needs ~22 KB of free heap for the TLS handshake.
+// Free heap is checked before attempting TLS so the error is reported clearly instead
+// of a silent HTTP -1.
 //
-// HEAP WARNING: BearSSL needs ~22KB of free heap for TLS. If heap < 20KB
-// at call time, the connection will fail silently with HTTP -1.
-// Free heap is checked before attempting TLS and the error is reported clearly.
+// IMPORTANT: certBundle is built lazily via a pointer so that append() never runs more
+// than once — calling append() on a static X509List on every invocation would grow the
+// list unboundedly and waste heap on repeated OTA checks.
 
-static const char kGithubRootCA_USERTrust[] PROGMEM = R"EOF(
+static const char kGithubRootCA_ISRG_X1[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
@@ -774,27 +773,18 @@ static bool probeMfln(uint16_t maxSize) {
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
-  static BearSSL::X509List certBundle(kGithubRootCA_USERTrust);
-  certBundle.append(kGithubRootCA_DigiCertG2);
-
-  uint32_t freeHeap = ESP.getFreeHeap();
-
-  if (freeHeap >= 16000) {
-    // Enough heap — try MFLN 1024 with certificate verification (safest)
-    if (probeMfln(1024)) {
-      client.setBufferSizes(1024, 512);
-    }
-    client.setTrustAnchors(&certBundle);
-  } else {
-    // Low heap — use MFLN 512 + skip cert verification to fit in RAM.
-    // Safe for this use case (public repo, binary is unsigned anyway).
-    if (probeMfln(512)) {
-      client.setBufferSizes(512, 512);
-    }
-    client.setInsecure();
+  // Built lazily once via a pointer; append() must NOT run on every call or the
+  // list grows on repeated OTA checks, leaking heap and BearSSL parse state.
+  static BearSSL::X509List* certBundle = nullptr;
+  if (!certBundle) {
+    certBundle = new BearSSL::X509List(kGithubRootCA_DigiCertG2);
+    certBundle->append(kGithubRootCA_ISRG_X1);
   }
+  client.setTrustAnchors(certBundle);
 #else
-  static String combinedCA = String(kGithubRootCA_USERTrust) + String(kGithubRootCA_DigiCertG2);
+  // mbedTLS parses all PEM certs in the buffer.
+  // Static so the concatenated string is built only once.
+  static const String combinedCA = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
   client.setCACert(combinedCA.c_str());
 #endif
 }
@@ -813,22 +803,20 @@ static bool checkHeapForTls(String& outErr) {
 }
 
 static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {
-  const char* latestApiUrl = "https://api.github.com/repos/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
-  const char* latestHtmlUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
-
   if (WiFi.status() != WL_CONNECTED) {
-    outErr = "Wi-Fi station is not connected to the internet. Connect STA Wi-Fi first, then retry update check.";
+    outErr = "Wi-Fi not connected. Connect STA Wi-Fi first, then retry.";
     return false;
   }
-
-  // BearSSL TLS needs ~22KB of contiguous heap. Check before attempting.
+  // BearSSL TLS needs ~22 KB of contiguous heap — check before allocating anything else.
   if (!checkHeapForTls(outErr)) return false;
 
-  HTTPClient http;
   WiFiClientSecure client;
   configureGithubTls(client);
+  HTTPClient http;
   http.setTimeout(15000);
-  if (!http.begin(client, latestApiUrl)) {
+
+  const char* apiUrl = "https://api.github.com/repos/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
+  if (!http.begin(client, apiUrl)) {
     outErr = "HTTP begin failed for GitHub API.";
     return false;
   }
@@ -836,79 +824,44 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
   http.addHeader("User-Agent", "dynet-gateway-ota");
 
   int code = http.GET();
-  if (code == HTTP_CODE_OK) {
-    // Use a streaming filter so ArduinoJson only allocates memory for the
-    // two fields we need — tag_name and the first .bin asset URL.
-    // The full GitHub releases/latest response is ~8-30KB; with a filter
-    // the doc needs only ~512 bytes regardless of response size.
-    StaticJsonDocument<200> filter;
-    filter["tag_name"] = true;
-    JsonObject filterAssets = filter["assets"].createNestedObject();
-    filterAssets["name"] = true;
-    filterAssets["browser_download_url"] = true;
-
-    // 1024 bytes is enough for tag_name + one asset entry after filtering.
-    StaticJsonDocument<1024> doc;
-    DeserializationError jerr = deserializeJson(doc, http.getStream(),
-                                  DeserializationOption::Filter(filter));
+  if (code != HTTP_CODE_OK) {
     http.end();
-    if (jerr) {
-      outErr = String("GitHub JSON parse error: ") + jerr.c_str()
-             + ". Free heap: " + String(ESP.getFreeHeap()) + " bytes.";
-      return false;
-    }
-
-    outTag = doc["tag_name"] | "";
-    JsonArray assets = doc["assets"].as<JsonArray>();
-    for (JsonVariant v : assets) {
-      const char* name = v["name"] | "";
-      const char* url  = v["browser_download_url"] | "";
-      if (name && url && String(name).endsWith(".bin")) {
-        outBinUrl = String(url);
-        break;
-      }
-    }
-  } else {
-    String apiErr = String("GitHub API request failed (HTTP ") + code + "): " + HTTPClient::errorToString(code) + ".";
-    http.end();
-
-    // Fallback for environments where api.github.com is blocked/unreachable.
-    HTTPClient htmlHttp;
-    WiFiClientSecure htmlClient;
-    configureGithubTls(htmlClient);
-    htmlHttp.setTimeout(15000);
-    htmlHttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    if (!htmlHttp.begin(htmlClient, latestHtmlUrl)) {
-      outErr = apiErr + " Fallback HTTP begin failed.";
-      return false;
-    }
-    htmlHttp.addHeader("User-Agent", "dynet-gateway-ota");
-    int htmlCode = htmlHttp.GET();
-    if (htmlCode != HTTP_CODE_OK) {
-      outErr = apiErr + " Fallback page request failed (HTTP " + String(htmlCode) + "): " + HTTPClient::errorToString(htmlCode) + ".";
-      if (code < 0 && htmlCode < 0) {
-        outErr += " Could not reach github.com/api.github.com from this network. "
-                  "Check DNS/internet access, firewall/proxy rules, or try a different Wi-Fi network.";
-      }
-      htmlHttp.end();
-      return false;
-    }
-    String html = htmlHttp.getString();
-    htmlHttp.end();
-    if (!parseLatestReleaseFromHtml(html, outTag, outBinUrl)) {
-      outErr = apiErr + " Fallback parse failed (no .bin release asset found).";
-      return false;
-    }
-  }
-
-  if (!outTag.length()) {
-    outErr = "No release tag found.";
+    outErr = String("GitHub API HTTP ") + code + ": " + HTTPClient::errorToString(code) + ".";
+    if (code < 0)
+      outErr += " Check DNS/internet access, firewall, or try again after reboot.";
     return false;
   }
-  if (!outBinUrl.length()) {
-    outErr = "No .bin firmware asset found in latest release.";
+
+  // Use an ArduinoJson filter so only tag_name + assets[].{name, browser_download_url}
+  // are stored. This reduces the document from 16 KB to ~1.5 KB, which is the key fix
+  // that allows BearSSL (~22 KB) and the JSON doc to coexist within ESP8266 heap.
+  StaticJsonDocument<192> filter;
+  filter["tag_name"] = true;
+  filter["assets"][0]["name"] = true;
+  filter["assets"][0]["browser_download_url"] = true;
+
+  DynamicJsonDocument doc(1536);
+  DeserializationError jerr = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+
+  if (jerr) {
+    outErr = String("JSON parse error: ") + jerr.c_str();
     return false;
   }
+
+  outTag = doc["tag_name"] | "";
+  JsonArray assets = doc["assets"].as<JsonArray>();
+  for (JsonVariant v : assets) {
+    const char* name = v["name"] | "";
+    const char* url  = v["browser_download_url"] | "";
+    if (name && url && String(name).endsWith(".bin")) {
+      outBinUrl = String(url);
+      break;
+    }
+  }
+
+  if (!outTag.length())    { outErr = "No release tag found in API response.";         return false; }
+  if (!outBinUrl.length()) { outErr = "No .bin firmware asset found in latest release."; return false; }
   return true;
 }
 

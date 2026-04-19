@@ -8,14 +8,18 @@ static const unsigned long STA_RETRY_INTERVAL = 6000;
 static const uint8_t       MAX_STA_RETRY      = 5;
 
 static void logStaNetworkInfo() {
-  LOGF("[NET] IP: %s\n", WiFi.localIP().toString().c_str());
-  LOGF("[NET] Subnet: %s\n", WiFi.subnetMask().toString().c_str());
-  LOGF("[NET] Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
+  const String ip = WiFi.localIP().toString();
+  const String sn = WiFi.subnetMask().toString();
+  const String gw = WiFi.gatewayIP().toString();
 #if defined(ESP8266)
-  LOGF("[NET] DNS: %s\n", WiFi.dnsIP().toString().c_str());
+  const String dns = WiFi.dnsIP().toString();
+  LOGF("[NET] IP=%s subnet=%s gateway=%s dns=%s\n",
+       ip.c_str(), sn.c_str(), gw.c_str(), dns.c_str());
 #else
-  LOGF("[NET] DNS1: %s\n", WiFi.dnsIP(0).toString().c_str());
-  LOGF("[NET] DNS2: %s\n", WiFi.dnsIP(1).toString().c_str());
+  const String dns1 = WiFi.dnsIP(0).toString();
+  const String dns2 = WiFi.dnsIP(1).toString();
+  LOGF("[NET] IP=%s subnet=%s gateway=%s dns1=%s dns2=%s\n",
+       ip.c_str(), sn.c_str(), gw.c_str(), dns1.c_str(), dns2.c_str());
 #endif
 }
 
@@ -100,7 +104,6 @@ void updateWiFiSM() {
     if (apActive) {
       stopAP();
       LOGLN("[NET] STA connected -> AP OFF");
-      logStaNetworkInfo();
     }
     staBusy = false;
     staRetries = 0;

@@ -645,31 +645,6 @@ static int compareVersion(const String& aRaw, const String& bRaw) {
   return 0;
 }
 
-static bool parseLatestReleaseFromHtml(const String& html, String& outTag, String& outBinUrl) {
-  const String marker = "/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/download/";
-  int pos = html.indexOf(marker);
-  while (pos >= 0) {
-    int tagStart = pos + marker.length();
-    int tagEnd = html.indexOf('/', tagStart);
-    if (tagEnd <= tagStart) break;
-
-    int fileStart = tagEnd + 1;
-    int fileEnd = html.indexOf('"', fileStart);
-    if (fileEnd <= fileStart) {
-      pos = html.indexOf(marker, pos + 1);
-      continue;
-    }
-
-    String filename = html.substring(fileStart, fileEnd);
-    if (filename.endsWith(".bin")) {
-      outTag = html.substring(tagStart, tagEnd);
-      outBinUrl = String("https://github.com") + marker + outTag + "/" + filename;
-      return true;
-    }
-    pos = html.indexOf(marker, pos + 1);
-  }
-  return false;
-}
 
 // GitHub uses a DigiCert certificate chain. We embed DigiCert Global Root G2 (valid until 2038)
 // plus ISRG Root X1 (Let's Encrypt, valid until 2035) as a fallback for GitHub's CDN/asset hosts.
@@ -747,58 +722,20 @@ d7PQOGbGWYxqH8o9R7eSYvdAd4uNjI23KzwBmH8=
 //  Tier 2 ( >8KB free): MFLN 512  + setInsecure()  → ~3KB buffers, no cert check
 //  Tier 3 (<8KB free) : abort with a clear message
 //
-// MFLN lets the ESP negotiate smaller TLS record buffers with the server.
-// GitHub's servers do support MFLN (probed once, cached in a static).
-// setInsecure() is acceptable here because:
-//   a) you own the repo — you know what binary is there
-//   b) the binary is already public and unsigned
-//   c) an attacker on the same LAN could MITM HTTP just as easily
-//
+// On ESP8266 we use setInsecure() + MFLN (via setBufferSizes) to keep
+// heap usage to ~4.5 KB for the TLS session.  Certificate verification is
+// skipped because the binary is public and unsigned anyway.
 // On ESP32 heap is not a concern so we always verify.
-
-#if defined(ESP8266)
-static int8_t g_mflnSupported = -1;  // -1=unknown, 0=no, 1=yes
-
-static bool probeMfln(uint16_t maxSize) {
-  if (g_mflnSupported == 0) return false;
-  WiFiClientSecure probe;
-  probe.setInsecure();
-  probe.setTimeout(8000);
-  bool ok = probe.probeMaxFragmentLength("api.github.com", 443, maxSize);
-  g_mflnSupported = ok ? 1 : 0;
-  return ok;
-}
-#endif
 
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
-  // setBufferSizes(recv, xmit) — recv is the FIRST argument.
-  //
-  // Without MFLN, the server chooses TLS record sizes freely (up to 16 384 bytes).
-  // GitHub's Certificate record is typically 3-5 KB, so recv=512 (our previous value)
-  // cannot hold it → TLS handshake silently fails → HTTP -1.
-  //
-  // With MFLN negotiated the server caps every record at our requested size (512 bytes),
-  // so a recv buffer of 1024 bytes (512 + TLS overhead) is sufficient.
-  //
-  // probeMfln() uses a raw TCP probe — it does NOT allocate BearSSL I/O buffers,
-  // so heap cost is minimal (~1 KB for the socket).  Result is cached in a static.
-  if (probeMfln(512)) {
-    client.setMFLN(512);
-    client.setBufferSizes(1024, 512); // recv=1024 (512 + overhead), xmit=512 — ~1.5 KB total
-    static BearSSL::X509List* certBundle = nullptr;
-    if (!certBundle) {
-      certBundle = new BearSSL::X509List(kGithubRootCA_DigiCertG2);
-      certBundle->append(kGithubRootCA_ISRG_X1);
-    }
-    client.setTrustAnchors(certBundle);
-  } else {
-    // MFLN not supported (rare for GitHub) — need recv large enough for the
-    // Certificate record.  Skip cert verification to save X509List heap overhead.
-    client.setBufferSizes(4096, 512); // recv=4096, xmit=512 — saves ~12 KB vs default
-    client.setInsecure();
-  }
+  // setInsecure() skips X509List allocation (~1.5 KB saved).
+  // setBufferSizes(recv=1024, xmit=512): BearSSL automatically advertises
+  // MFLN=1024 in ClientHello when recv < 16384. GitHub supports MFLN and
+  // will send all records in <=1024-byte chunks. No probe needed.
+  client.setInsecure();
+  client.setBufferSizes(1024, 512);
 #else
   static const String combinedCA = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
   client.setCACert(combinedCA.c_str());
@@ -823,7 +760,7 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
     outErr = "Wi-Fi not connected. Connect STA Wi-Fi first, then retry.";
     return false;
   }
-  // BearSSL TLS needs ~22 KB of contiguous heap — check before allocating anything else.
+  // BearSSL TLS with MFLN+setInsecure needs ~4.5 KB — check before allocating.
   if (!checkHeapForTls(outErr)) return false;
 
   WiFiClientSecure client;

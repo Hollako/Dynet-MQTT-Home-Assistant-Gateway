@@ -721,6 +721,10 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
     int htmlCode = htmlHttp.GET();
     if (htmlCode != HTTP_CODE_OK) {
       outErr = apiErr + " Fallback page request failed (HTTP " + String(htmlCode) + "): " + HTTPClient::errorToString(htmlCode) + ".";
+      if (code < 0 && htmlCode < 0) {
+        outErr += " Could not reach github.com/api.github.com from this network. "
+                  "Check DNS/internet access, firewall/proxy rules, or try a different Wi-Fi network.";
+      }
       htmlHttp.end();
       return false;
     }
@@ -788,10 +792,19 @@ static void handleFwGet() {
 static void handleFwCheckUpdate() {
   String latestTag, binUrl, err;
   if (!fetchLatestReleaseInfo(latestTag, binUrl, err)) {
+    const char* otaReleaseUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
     pageBegin("Firmware Update");
     pageWrite(F("<div class='card'><div class='title'>Update Check Failed</div><p>"));
     pageWrite(err);
-    pageWrite(F("</p><a class='btn' href='/fw'>Back</a></div>"));
+    pageWrite(F("</p><p style='opacity:.8'>You can still update manually by uploading a .bin file from the latest release page.</p>"
+                "<div class='row' style='margin-top:10px'>"
+                "<a class='btn' target='_blank' rel='noopener' href='"));
+    pageWrite(String(otaReleaseUrl));
+    pageWrite(F("'>Open GitHub Release</a>"
+                "</div>"
+                "<div class='row' style='margin-top:10px'>"
+                "<a class='btn' href='/fw'>Back</a>"
+                "</div></div>"));
     pageEnd();
     return;
   }

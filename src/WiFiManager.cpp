@@ -1,4 +1,5 @@
 #include "Globals.h"
+#include <time.h>
 
 // Debounced STA connect/retry
 static bool          staBusy = false;
@@ -24,6 +25,37 @@ static void logStaNetworkInfo() {
   LOGF("[NET] IP=%s subnet=%s gateway=%s dns1=%s dns2=%s\n",
        ip.c_str(), sn.c_str(), gw.c_str(), dns1.c_str(), dns2.c_str());
 #endif
+}
+
+static bool ntpSynced = false;
+
+static void syncNtpTime() {
+  if (ntpSynced) return;
+
+  LOGLN("[NTP] Starting time sync with pool.ntp.org/time.nist.gov");
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  time_t now = time(nullptr);
+  uint8_t attempts = 0;
+  while (now < 100000 && attempts < 40) {
+    delay(500);
+    now = time(nullptr);
+    attempts++;
+  }
+
+  if (now >= 100000) {
+    ntpSynced = true;
+    struct tm* utc = gmtime(&now);
+    char ts[32] = {0};
+    if (utc && strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S UTC", utc) > 0) {
+      LOGF("[NTP] Sync OK epoch=%lu after %u attempts\n", (unsigned long)now, attempts);
+      LOGF("[NTP] Current UTC time: %s\n", ts);
+    } else {
+      LOGF("[NTP] Sync OK epoch=%lu after %u attempts (time format failed)\n", (unsigned long)now, attempts);
+    }
+  } else {
+    LOGF("[NTP] Sync failed after %u attempts (epoch=%lu)\n", attempts, (unsigned long)now);
+  }
 }
 
 const char* reasonToStr(uint8_t r) {
@@ -154,6 +186,7 @@ void installWiFiDebugHandlers() {
     LOGF("[WIFI] %s gw=%s mask=%s rssi=%d dBm\n",
       staLastEvent.c_str(), ev.gw.toString().c_str(), ev.mask.toString().c_str(), WiFi.RSSI());
     logStaNetworkInfo();
+    syncNtpTime();
   });
 
   WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& ev){
@@ -206,6 +239,7 @@ void installWiFiDebugHandlers() {
         WiFi.subnetMask().toString().c_str(),
         WiFi.RSSI());
       logStaNetworkInfo();
+      syncNtpTime();
       return;
     }
 

@@ -5,7 +5,10 @@ static bool          staBusy = false;
 static unsigned long nextStaAttempt = 0;
 static const unsigned long STA_CONNECT_GRACE = 4000;
 static const unsigned long STA_RETRY_INTERVAL = 6000;
-static const uint8_t       MAX_STA_RETRY      = 5;
+
+static void bumpStaRetries() {
+  if (staRetries < 255) staRetries++;
+}
 
 static void logStaNetworkInfo() {
   const String ip = WiFi.localIP().toString();
@@ -58,7 +61,7 @@ void beginSTAIfCreds() {
   WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
 
   staBusy = true;
-  staRetries++;
+  bumpStaRetries();
   nextStaAttempt = millis() + STA_CONNECT_GRACE;
 }
 
@@ -121,9 +124,9 @@ void updateWiFiSM() {
     }
   }
 
-  // Debounced STA retries
+  // Debounced STA retries (keep trying forever, similar to Tasmota behavior)
   if (strlen(cfg.wifi_ssid) > 0) {
-    if (!staBusy && millis() >= nextStaAttempt && staRetries < MAX_STA_RETRY) {
+    if (!staBusy && millis() >= nextStaAttempt) {
       Serial.printf("[WIFI] retry %u to '%s' status=%d\n", staRetries, cfg.wifi_ssid, WiFi.status());
       beginSTAIfCreds(); // sets staBusy + nextStaAttempt
     }
@@ -162,7 +165,7 @@ void installWiFiDebugHandlers() {
     staBusy = false;
 
     const bool manualLeave = (ev.reason == 8);  // ASSOC_LEAVE
-    if (!manualLeave && staRetries < MAX_STA_RETRY) staRetries++;
+    if (!manualLeave) bumpStaRetries();
 
     nextStaAttempt = millis() + STA_RETRY_INTERVAL;
     Serial.printf("[WIFI] %s (retry=%u)\n", staLastEvent.c_str(), staRetries);
@@ -174,7 +177,7 @@ void installWiFiDebugHandlers() {
     staLastEvent = "DHCP_TIMEOUT";
     lastStaChangeMs = millis();
     staBusy = false;
-    if (staRetries < MAX_STA_RETRY) staRetries++;
+    bumpStaRetries();
     nextStaAttempt = millis() + (STA_RETRY_INTERVAL / 2);
     Serial.println("[WIFI] DHCP_TIMEOUT");
   });
@@ -215,7 +218,7 @@ void installWiFiDebugHandlers() {
       staBusy = false;
 
       const bool manualLeave = (staDiscReason == 8);  // ASSOC_LEAVE
-      if (!manualLeave && staRetries < MAX_STA_RETRY) staRetries++;
+      if (!manualLeave) bumpStaRetries();
 
       nextStaAttempt = millis() + STA_RETRY_INTERVAL;
       Serial.printf("[WIFI] %s (retry=%u)\n", staLastEvent.c_str(), staRetries);

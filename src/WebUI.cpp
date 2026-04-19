@@ -793,7 +793,12 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
 static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, String& outErr) {
   WiFiClient client;
   client.setTimeout(timeoutMs / 1000);
-  if (!client.connect(host, port, timeoutMs)) {
+#if defined(ESP8266)
+  bool ok = client.connect(host, port);
+#else
+  bool ok = client.connect(host, port, timeoutMs);
+#endif
+  if (!ok) {
     outErr = String("TCP connect failed to ") + host + ":" + String(port);
     return false;
   }
@@ -842,6 +847,36 @@ static void handleNetCheck() {
   bool githubTcp = hostReachable("api.github.com", 443, 5000, err);
   doc["tcp_github_443_ok"] = githubTcp;
   if (!githubTcp) doc["tcp_github_443_err"] = err;
+
+  String dnsGoogleErr = String(doc["dns_google_err"] | "");
+  String dnsGithubErr = String(doc["dns_github_err"] | "");
+  String tcpGoogleErr = String(doc["tcp_google_443_err"] | "");
+  String tcpGithubErr = String(doc["tcp_github_443_err"] | "");
+  String dnsGoogleSuffix = googleDns ? "" : String(" err=") + dnsGoogleErr;
+  String dnsGithubSuffix = githubDns ? "" : String(" err=") + dnsGithubErr;
+  String tcpGoogleSuffix = googleTcp ? "" : String(" err=") + tcpGoogleErr;
+  String tcpGithubSuffix = githubTcp ? "" : String(" err=") + tcpGithubErr;
+
+  LOGF("[NETCHECK] wifi=%s ssid='%s' ip=%s gw=%s dns1=%s\n",
+       doc["wifi_connected"].as<bool>() ? "ok" : "down",
+       doc["sta_ssid"].as<const char*>(),
+       doc["sta_ip"].as<const char*>(),
+       doc["gateway"].as<const char*>(),
+       doc["dns1"].as<const char*>());
+  LOGF("[NETCHECK] dns google=%s ip=%s%s\n",
+       googleDns ? "ok" : "fail",
+       doc["dns_google_ip"].as<const char*>(),
+       dnsGoogleSuffix.c_str());
+  LOGF("[NETCHECK] dns github=%s ip=%s%s\n",
+       githubDns ? "ok" : "fail",
+       doc["dns_github_ip"].as<const char*>(),
+       dnsGithubSuffix.c_str());
+  LOGF("[NETCHECK] tcp google:443=%s%s\n",
+       googleTcp ? "ok" : "fail",
+       tcpGoogleSuffix.c_str());
+  LOGF("[NETCHECK] tcp api.github.com:443=%s%s\n",
+       githubTcp ? "ok" : "fail",
+       tcpGithubSuffix.c_str());
 
   server.sendHeader("Cache-Control", "no-store");
   String out;

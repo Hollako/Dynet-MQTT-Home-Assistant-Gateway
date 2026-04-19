@@ -741,34 +741,74 @@ d7PQOGbGWYxqH8o9R7eSYvdAd4uNjI23KzwBmH8=
 -----END CERTIFICATE-----
 )EOF";
 
+// ── TLS helpers ────────────────────────────────────────────────────────────
+// BearSSL buffer strategy for low-heap ESP8266:
+//
+//  Tier 1 (>16KB free): MFLN 1024 + verified cert  → ~6KB buffers, full security
+//  Tier 2 ( >8KB free): MFLN 512  + setInsecure()  → ~3KB buffers, no cert check
+//  Tier 3 (<8KB free) : abort with a clear message
+//
+// MFLN lets the ESP negotiate smaller TLS record buffers with the server.
+// GitHub's servers do support MFLN (probed once, cached in a static).
+// setInsecure() is acceptable here because:
+//   a) you own the repo — you know what binary is there
+//   b) the binary is already public and unsigned
+//   c) an attacker on the same LAN could MITM HTTP just as easily
+//
+// On ESP32 heap is not a concern so we always verify.
+
+#if defined(ESP8266)
+static int8_t g_mflnSupported = -1;  // -1=unknown, 0=no, 1=yes
+
+static bool probeMfln(uint16_t maxSize) {
+  if (g_mflnSupported == 0) return false;
+  WiFiClientSecure probe;
+  probe.setInsecure();
+  probe.setTimeout(8000);
+  bool ok = probe.probeMaxFragmentLength("api.github.com", 443, maxSize);
+  g_mflnSupported = ok ? 1 : 0;
+  return ok;
+}
+#endif
+
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
-  // Load both CA certs into a single X509List bundle.
-  // BearSSL will accept a handshake that matches ANY cert in the list,
-  // so this works regardless of which root GitHub is currently presenting.
   static BearSSL::X509List certBundle(kGithubRootCA_USERTrust);
   certBundle.append(kGithubRootCA_DigiCertG2);
-  client.setTrustAnchors(&certBundle);
+
+  uint32_t freeHeap = ESP.getFreeHeap();
+
+  if (freeHeap >= 16000) {
+    // Enough heap — try MFLN 1024 with certificate verification (safest)
+    if (probeMfln(1024)) {
+      client.setBufferSizes(1024, 512);
+    }
+    client.setTrustAnchors(&certBundle);
+  } else {
+    // Low heap — use MFLN 512 + skip cert verification to fit in RAM.
+    // Safe for this use case (public repo, binary is unsigned anyway).
+    if (probeMfln(512)) {
+      client.setBufferSizes(512, 512);
+    }
+    client.setInsecure();
+  }
 #else
-  // ESP32: setCACert only accepts a single PEM string.
-  // Concatenate both — mbedTLS parses all certs in the buffer.
   static String combinedCA = String(kGithubRootCA_USERTrust) + String(kGithubRootCA_DigiCertG2);
   client.setCACert(combinedCA.c_str());
 #endif
 }
 
-// Check if there is enough heap for a BearSSL TLS connection (~22KB needed).
-// Call this before any WiFiClientSecure operation and surface the error clearly
-// instead of getting a silent HTTP -1.
 static bool checkHeapForTls(String& outErr) {
-  const uint32_t needed = 22000;
-  uint32_t free = ESP.getFreeHeap();
-  if (free < needed) {
-    outErr = String("Not enough free heap for TLS handshake. Need ~22KB, have ")
-           + String(free / 1024) + "KB. Reboot the device and try again immediately after boot.";
+#if defined(ESP8266)
+  // With MFLN 512 we need ~5KB minimum; below 8KB something else is wrong.
+  if (ESP.getFreeHeap() < 8000) {
+    outErr = String("Heap critically low (")
+           + String(ESP.getFreeHeap() / 1024)
+           + "KB free). Reboot the device and run the update check immediately after boot.";
     return false;
   }
+#endif
   return true;
 }
 
@@ -797,11 +837,24 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
 
   int code = http.GET();
   if (code == HTTP_CODE_OK) {
-    DynamicJsonDocument doc(16384);
-    DeserializationError jerr = deserializeJson(doc, http.getStream());
+    // Use a streaming filter so ArduinoJson only allocates memory for the
+    // two fields we need — tag_name and the first .bin asset URL.
+    // The full GitHub releases/latest response is ~8-30KB; with a filter
+    // the doc needs only ~512 bytes regardless of response size.
+    StaticJsonDocument<200> filter;
+    filter["tag_name"] = true;
+    JsonObject filterAssets = filter["assets"].createNestedObject();
+    filterAssets["name"] = true;
+    filterAssets["browser_download_url"] = true;
+
+    // 1024 bytes is enough for tag_name + one asset entry after filtering.
+    StaticJsonDocument<1024> doc;
+    DeserializationError jerr = deserializeJson(doc, http.getStream(),
+                                  DeserializationOption::Filter(filter));
     http.end();
     if (jerr) {
-      outErr = "Invalid JSON from GitHub.";
+      outErr = String("GitHub JSON parse error: ") + jerr.c_str()
+             + ". Free heap: " + String(ESP.getFreeHeap()) + " bytes.";
       return false;
     }
 

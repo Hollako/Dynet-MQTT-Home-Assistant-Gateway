@@ -743,6 +743,12 @@ d7PQOGbGWYxqH8o9R7eSYvdAd4uNjI23KzwBmH8=
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
+  // Shrink TLS I/O buffers: default RX is 16 384 bytes — the biggest single heap
+  // allocation in the TLS stack on ESP8266.  4 096 bytes is enough because GitHub's
+  // servers send TLS records well within that limit, and BearSSL reassembles records
+  // across multiple reads automatically.  This saves ~12 KB of heap.
+  client.setBufferSizes(512, 4096);
+
   // Built lazily once via a pointer; append() must NOT run on every call or the
   // list grows on repeated OTA checks, leaking heap and BearSSL parse state.
   static BearSSL::X509List* certBundle = nullptr;
@@ -759,15 +765,15 @@ static void configureGithubTls(WiFiClientSecure& client) {
 #endif
 }
 
-// Check if there is enough heap for a BearSSL TLS connection (~22KB needed).
-// Call this before any WiFiClientSecure operation and surface the error clearly
-// instead of getting a silent HTTP -1.
+// Pre-flight heap check before creating a WiFiClientSecure.
+// With setBufferSizes(512, 4096) the BearSSL context needs ~8-10 KB instead of ~22 KB,
+// so 12 KB is a conservative safe threshold.
 static bool checkHeapForTls(String& outErr) {
-  const uint32_t needed = 22000;
-  uint32_t free = ESP.getFreeHeap();
-  if (free < needed) {
-    outErr = String("Not enough free heap for TLS handshake. Need ~22KB, have ")
-           + String(free / 1024) + "KB. Reboot the device and try again immediately after boot.";
+  const uint32_t needed = 12000;
+  uint32_t freeH = ESP.getFreeHeap();
+  if (freeH < needed) {
+    outErr = String("Not enough free heap for TLS (need ~12KB, have ")
+           + String(freeH / 1024) + "KB). Reboot and try immediately after boot.";
     return false;
   }
   return true;

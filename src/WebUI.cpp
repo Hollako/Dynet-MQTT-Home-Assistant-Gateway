@@ -1061,7 +1061,6 @@ static void handleNetCheck() {
 }
 
 static void handleFwGet() {
-  const char* otaReleaseUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
   pageBegin("Firmware Update");
 
   pageWrite(F("<div class='card'>"
@@ -1069,9 +1068,6 @@ static void handleFwGet() {
   pageWrite(F("<p>Current release: <b>"));
   pageWrite(String(HA_SW_VERSION));
   pageWrite(F("</b></p>"
-              "<p>Current firmware details: "));
-  pageWrite(fwVersionString());
-  pageWrite(F("</p>"
               "<form method='POST' action='/fw' enctype='multipart/form-data' class='form-sec'>"
               "<div class='field'>"
                 "<input type='file' name='fw' accept='.bin' required>"
@@ -1099,17 +1095,6 @@ static void handleFwGet() {
   pageWrite(F(
               "<div class='row' style='margin-top:10px'>"
                 "<a class='btn' href='/netcheck' target='_blank' rel='noopener'>Run Internet Check</a>"
-              "</div>"
-              "<div class='field' style='margin-top:16px'>"
-                "<label>OTA URL (GitHub release)</label>"
-                "<input type='text' class='in wide' readonly value='"));
-  pageWrite(String(otaReleaseUrl));
-  pageWrite(F("'>"
-              "</div>"
-              "<div class='row' style='margin-top:10px'>"
-                "<a class='btn' target='_blank' rel='noopener' href='"));
-  pageWrite(String(otaReleaseUrl));
-  pageWrite(F("'>Open GitHub Release</a>"
               "</div>"
               "<p style='opacity:.7'>Do not power off during update. Device will reboot automatically.</p>"
               "</div>"));

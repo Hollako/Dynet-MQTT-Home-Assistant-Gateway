@@ -622,24 +622,19 @@ void mqttLoop() {
               DynetEntities::em.areasCount());
 
           // publish one channel per tick
-          if (rediscoveryPtr < em.channelsCount()) {
+          if (rediscoveryPtr < (uint16_t)em.channelsCount()) {
             publishHADiscoveryForChannel(rediscoveryPtr);
             rediscoveryPtr++;
             nextRediscoveryAt = millis() + 120;
-          } else {
-            // then publish areas once
-            static bool areasDone = false;
-
-            if (!areasDone) {
-              for (int i = 0; i < em.areasCount(); i++) {
-                publishHADiscoveryForArea(em.areaAt(i).area);
-              }
-              areasDone = true;
-              nextRediscoveryAt = millis() + 200;
-            } else {
-              // done
-              rediscoveryScheduled = false;
+          } else if (rediscoveryPtr == (uint16_t)em.channelsCount()) {
+            // Publish areas once, then advance ptr past this gate so we don't repeat.
+            for (int i = 0; i < em.areasCount(); i++) {
+              publishHADiscoveryForArea(em.areaAt(i).area);
             }
+            rediscoveryPtr++;           // move past the "areas" gate
+            nextRediscoveryAt = millis() + 200;
+          } else {
+            rediscoveryScheduled = false;
           }
           delay(0); // yield
         }

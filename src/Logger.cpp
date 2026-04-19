@@ -10,8 +10,8 @@ static Print* s_logSerial = nullptr;
 void log_put_raw(const char* s) {
   logBuffer += s;
   logSeq++;
-  if (logBuffer.length() > 8192) {
-    logBuffer.remove(0, logBuffer.length() - 4096); // trim to avoid overflow
+  if (logBuffer.length() > 4096) {
+    logBuffer.remove(0, logBuffer.length() - 2048);
   }
   if (s_logSerial) s_logSerial->print(s);
 }

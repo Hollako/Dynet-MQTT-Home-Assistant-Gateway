@@ -735,6 +735,16 @@ static String gOtaCurrentVersion;
 // skipped because the binary is public and unsigned anyway.
 // On ESP32 heap is not a concern so we always verify.
 
+// Cross-platform "largest contiguous free heap block" helper.
+// ESP8266: getMaxFreeBlockSize()  |  ESP32: getMaxAllocHeap()
+static inline uint32_t maxFreeBlock() {
+#if defined(ESP8266)
+  return ESP.getMaxFreeBlockSize();
+#else
+  return ESP.getMaxAllocHeap();
+#endif
+}
+
 static void configureGithubTls(WiFiClientSecure& client) {
   client.setTimeout(15000);
 #if defined(ESP8266)
@@ -760,7 +770,7 @@ static bool checkHeapForTls(String& outErr) {
   // Minimum contiguous block needed: 4096 + 5500 ≈ 11 KB.
   // This check runs AFTER logs_clear() + mqtt.disconnect() so the number
   // reflects the cleaned-up state, not the busy-device worst case.
-  uint32_t maxBlock = ESP.getMaxFreeBlockSize();
+  uint32_t maxBlock = maxFreeBlock();
   if (maxBlock < 11000) {
     outErr = String("Heap fragmented (largest free block ")
            + String(maxBlock)
@@ -1264,7 +1274,7 @@ static void handleFwDoUpdate() {
   Serial.print(F(" heap="));
   Serial.print(ESP.getFreeHeap());
   Serial.print(F(" maxBlock="));
-  Serial.println(ESP.getMaxFreeBlockSize());
+  Serial.println(ESP.getMaxAllocHeap());
   Serial.flush();
 
   // Send the SSE "downloading" event as a complete fixed-length response so
@@ -1309,7 +1319,7 @@ static void handleFwDoUpdate() {
   Serial.print(F("[OTA] F: heap="));
   Serial.print(ESP.getFreeHeap());
   Serial.print(F(" maxBlock="));
-  Serial.println(ESP.getMaxFreeBlockSize());
+  Serial.println(ESP.getMaxAllocHeap());
   Serial.flush();
 
   // Check AFTER cleanup — 7 KB threshold matches our actual setBufferSizes(2048,512) need.

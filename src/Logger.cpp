@@ -57,7 +57,10 @@ uint32_t logs_serialize_since(uint32_t sinceSeq, String& out) {
 }
 
 void logs_serial_ready() {
-  s_logSerial = &Serial1;   // ESP8266 TX-only (GPIO2)
+  // Serial  = UART0 → USB on Wemos D1 / NodeMCU (what the PC sees in the monitor)
+  // Serial1 = UART1 TX-only on GPIO2 (hardware debug pin, not USB)
+  // We want USB so the PC monitor shows all logs.
+  s_logSerial = &Serial;
 }
 
 void logs_init(size_t /*capBytes*/) {

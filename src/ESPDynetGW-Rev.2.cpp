@@ -12,7 +12,7 @@ unsigned long lastDynetPoll = 0;
 const unsigned long DYNET_POLL_INTERVAL = 5000; // ms, to request feedback
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);  // 9600 was too slow: progress callback output blocked yield(), starving LwIP
   delay(200);
   
   Serial1.begin(115200);
@@ -84,6 +84,10 @@ void loop() {
 
   // Web server
   server.handleClient();
+
+  // Deferred OTA download (runs after the HTTP handler has returned and
+  // released its buffers, giving BearSSL a larger contiguous heap block).
+  webOtaLoop();
 
   // Dynet bus handler
   dynetLoop();

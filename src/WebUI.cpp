@@ -613,13 +613,6 @@ void sendRebootingPage(const char* title, const char* msg, int seconds, int dela
 }
 
 
-static String fwVersionString() {
-#if defined(ESP8266)
-  return String(ESP.getFullVersion());
-#else
-  return String(ESP.getSdkVersion());
-#endif
-}
 
 static String normalizeVersion(String v) {
   v.trim();
@@ -715,6 +708,21 @@ d7PQOGbGWYxqH8o9R7eSYvdAd4uNjI23KzwBmH8=
 -----END CERTIFICATE-----
 )EOF";
 
+// ---- OTA progress state ----
+// Prefixed FWOTA_ to avoid clash with ArduinoOTA.h's ota_state_t (OTA_IDLE etc.)
+enum FwOtaPhase : uint8_t { FWOTA_IDLE=0, FWOTA_RESOLVING, FWOTA_DOWNLOADING, FWOTA_SUCCESS, FWOTA_FAILED };
+static FwOtaPhase gOtaPhase  = FWOTA_IDLE;
+static String     gOtaError;
+
+// ---- Deferred OTA: handler stores the URL, main loop does the download ----
+// Running the TLS download inside the HTTP handler means web-server buffers +
+// BearSSL buffers compete for heap simultaneously → fragmentation crash.
+// By returning from the handler first, the web server releases its request
+// buffers before BearSSL allocates its own, giving a clean contiguous block.
+static bool   gOtaPending        = false;
+static String gOtaFinalUrl;
+static String gOtaCurrentVersion;
+
 // ── TLS helpers ────────────────────────────────────────────────────────────
 // BearSSL buffer strategy for low-heap ESP8266:
 //
@@ -744,18 +752,26 @@ static void configureGithubTls(WiFiClientSecure& client) {
 
 static bool checkHeapForTls(String& outErr) {
 #if defined(ESP8266)
-  // With MFLN 512 we need ~5KB minimum; below 8KB something else is wrong.
-  if (ESP.getFreeHeap() < 8000) {
-    outErr = String("Heap critically low (")
-           + String(ESP.getFreeHeap() / 1024)
-           + "KB free). Reboot the device and run the update check immediately after boot.";
+  // Use getMaxFreeBlockSize(): total free heap can look fine while fragmentation
+  // means no single block is large enough for the required allocations.
+  // Sequence after this check:
+  //   Update.begin()  → 4096 B sector buffer
+  //   setBufferSizes(512,512) + BearSSL handshake → ~5500 B (state + I/O buffers)
+  // Minimum contiguous block needed: 4096 + 5500 ≈ 11 KB.
+  // This check runs AFTER logs_clear() + mqtt.disconnect() so the number
+  // reflects the cleaned-up state, not the busy-device worst case.
+  uint32_t maxBlock = ESP.getMaxFreeBlockSize();
+  if (maxBlock < 11000) {
+    outErr = String("Heap fragmented (largest free block ")
+           + String(maxBlock)
+           + " bytes, need 11 KB). Reboot and retry immediately after boot.";
     return false;
   }
 #endif
   return true;
 }
 
-static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& outErr) {
+static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, int& outSize, String& outErr) {
   if (WiFi.status() != WL_CONNECTED) {
     outErr = "Wi-Fi not connected. Connect STA Wi-Fi first, then retry.";
     return false;
@@ -785,12 +801,15 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
     return false;
   }
 
-  // Use an ArduinoJson filter so only tag_name + assets[].{name, browser_download_url}
-  // are stored. This reduces the document from 16 KB to ~1.5 KB, which is the key fix
-  // that allows BearSSL (~22 KB) and the JSON doc to coexist within ESP8266 heap.
-  StaticJsonDocument<192> filter;
+  // Use an ArduinoJson filter so only tag_name + assets[].{name, size,
+  // browser_download_url} are stored.  This reduces the document from 16 KB
+  // to ~1.5 KB, which is the key fix that allows BearSSL (~22 KB) and the
+  // JSON doc to coexist within ESP8266 heap.  The size field lets us call
+  // Update.begin() before opening the download TLS session (see handleFwDoUpdate).
+  StaticJsonDocument<256> filter;
   filter["tag_name"] = true;
   filter["assets"][0]["name"] = true;
+  filter["assets"][0]["size"] = true;
   filter["assets"][0]["browser_download_url"] = true;
 
   DynamicJsonDocument doc(1536);
@@ -807,79 +826,39 @@ static bool fetchLatestReleaseInfo(String& outTag, String& outBinUrl, String& ou
   for (JsonVariant v : assets) {
     const char* name = v["name"] | "";
     const char* url  = v["browser_download_url"] | "";
-    if (name && url && String(name).endsWith(".bin")) {
-      outBinUrl = String(url);
-      break;
+    if (!name || !url || !String(name).endsWith(".bin")) continue;
+
+    // Platform-aware selection: skip binaries built for the other platform.
+    // Matches common naming patterns: ESP8266_xxx.bin / ESP32_xxx.bin
+    String sName = String(name);
+    sName.toLowerCase();
+#if defined(ESP8266)
+    if (sName.indexOf("esp32") >= 0) {
+      LOGF("[OTA] Skipping ESP32 asset: %s\n", name);
+      continue;
     }
+#else
+    if (sName.indexOf("esp8266") >= 0 || sName.indexOf("8266") >= 0) {
+      LOGF("[OTA] Skipping ESP8266 asset: %s\n", name);
+      continue;
+    }
+#endif
+    LOGF("[OTA] Selected asset: %s\n", name);
+    outBinUrl = String(url);
+    outSize   = v["size"] | 0;
+    break;
   }
 
   if (!outTag.length())    { outErr = "No release tag found in API response.";         return false; }
-  if (!outBinUrl.length()) { outErr = "No .bin firmware asset found in latest release."; return false; }
+  if (!outBinUrl.length()) { outErr = "No matching .bin asset found for this platform in latest release."; return false; }
+  if (outSize <= 0)        { outErr = "Asset size is 0 or missing in API response.";   return false; }
   return true;
-}
-
-#if defined(ESP8266)
-// ESP8266 WiFiClientSecure doesn't cleanly re-handshake after stop()+connect()
-// to a different host. Following a 302 redirect inside ESPhttpUpdate triggers
-// exactly that path and corrupts BearSSL state → "connection lost".
-// Fix: resolve the redirect URL up-front with a HEAD request so ESPhttpUpdate
-// gets a direct CDN URL and never needs to follow a redirect.
-static String resolveRedirectUrl(const String& url, String& outErr) {
-  WiFiClientSecure c;
-  c.setTimeout(10000);
-  c.setInsecure();
-  c.setBufferSizes(1024, 512);
-  HTTPClient http;
-  const char* hdrs[] = {"Location"};
-  http.collectHeaders(hdrs, 1);
-  if (!http.begin(c, url)) { outErr = "Redirect resolve: begin failed"; return ""; }
-  int code = http.sendRequest("HEAD");
-  String loc = http.header("Location");
-  http.end();
-  if (code == 200) return url;
-  if ((code == 301 || code == 302 || code == 307 || code == 308) && loc.length() > 0) return loc;
-  outErr = "Redirect resolve: unexpected HTTP " + String(code);
-  return "";
-}
-#endif
-
-static bool runOtaFromUrl(const String& binUrl, const String& currentVersion, String& outErr) {
-  if (!checkHeapForTls(outErr)) return false;
-
-#if defined(ESP8266)
-  // Resolve redirect first so ESPhttpUpdate connects directly to the CDN — no
-  // mid-download host switch, no BearSSL state corruption.
-  String finalUrl = resolveRedirectUrl(binUrl, outErr);
-  if (finalUrl.isEmpty()) return false;
-
-  WiFiClientSecure secureClient;
-  secureClient.setTimeout(60000);
-  secureClient.setInsecure();
-  secureClient.setBufferSizes(4096, 512);
-
-  ESPhttpUpdate.rebootOnUpdate(false);
-  ESPhttpUpdate.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
-  t_httpUpdate_return result = ESPhttpUpdate.update(secureClient, finalUrl, currentVersion);
-  if (result == HTTP_UPDATE_OK) return true;
-  outErr = ESPhttpUpdate.getLastErrorString();
-#else
-  WiFiClientSecure secureClient;
-  secureClient.setTimeout(60000);
-  {
-    static const String combinedCA = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
-    secureClient.setCACert(combinedCA.c_str());
-  }
-  httpUpdate.rebootOnUpdate(false);
-  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  t_httpUpdate_return result = httpUpdate.update(secureClient, binUrl, currentVersion);
-  if (result == HTTP_UPDATE_OK) return true;
-  outErr = httpUpdate.getLastErrorString();
-#endif
-  return false;
 }
 
 static String gPendingUpdateTag;
 static String gPendingUpdateUrl;
+static int    gPendingUpdateSize = 0;   // asset byte count from GitHub API
+
 
 static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, String& outErr) {
   WiFiClient client;
@@ -1063,6 +1042,23 @@ static void handleNetCheck() {
 static void handleFwGet() {
   pageBegin("Firmware Update");
 
+  // Show the result of the last OTA attempt (if any).
+  if (gOtaPhase == FWOTA_SUCCESS) {
+    pageWrite(F("<div class='card' style='border-left:4px solid green'>"
+                "<div class='title' style='color:green'>Update Successful</div>"
+                "<p>Firmware updated successfully. Current version: <b>"));
+    pageWrite(String(HA_SW_VERSION));
+    pageWrite(F("</b></p></div>"));
+    gOtaPhase = FWOTA_IDLE;
+  } else if (gOtaPhase == FWOTA_FAILED) {
+    pageWrite(F("<div class='card' style='border-left:4px solid red'>"
+                "<div class='title' style='color:red'>Update Failed</div>"
+                "<p>"));
+    pageWrite(gOtaError.length() ? gOtaError : String("Unknown error"));
+    pageWrite(F("</p></div>"));
+    gOtaPhase = FWOTA_IDLE;
+  }
+
   pageWrite(F("<div class='card'>"
               "<div class='title'>Manual Firmware Update</div>"));
   pageWrite(F("<p>Current release: <b>"));
@@ -1104,7 +1100,8 @@ static void handleFwGet() {
 
 static void handleFwCheckUpdate() {
   String latestTag, binUrl, err;
-  if (!fetchLatestReleaseInfo(latestTag, binUrl, err)) {
+  int    binSize = 0;
+  if (!fetchLatestReleaseInfo(latestTag, binUrl, binSize, err)) {
     const char* otaReleaseUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
     pageBegin("Firmware Update");
     pageWrite(F("<div class='card'><div class='title'>Update Check Failed</div><p>"));
@@ -1125,8 +1122,9 @@ static void handleFwCheckUpdate() {
   String current = normalizeVersion(String(HA_SW_VERSION));
   String latest = normalizeVersion(latestTag);
   if (compareVersion(latest, current) <= 0) {
-    gPendingUpdateTag = "";
-    gPendingUpdateUrl = "";
+    gPendingUpdateTag  = "";
+    gPendingUpdateUrl  = "";
+    gPendingUpdateSize = 0;
     pageBegin("Firmware Update");
     pageWrite(F("<div class='card'><div class='title'>No New Release</div><p>Current firmware is up to date.</p><p>Current: "));
     pageWrite(current);
@@ -1137,21 +1135,119 @@ static void handleFwCheckUpdate() {
     return;
   }
 
-  gPendingUpdateTag = latest;
-  gPendingUpdateUrl = binUrl;
+  gPendingUpdateTag  = latest;
+  gPendingUpdateUrl  = binUrl;
+  gPendingUpdateSize = binSize;
+
   pageBegin("Firmware Update");
   pageWrite(F("<div class='card'><div class='title'>New Release Available</div><p>Current: "));
   pageWrite(current);
   pageWrite(F("<br>Latest: "));
   pageWrite(latest);
-  pageWrite(F("</p><p>Update is ready to install.</p>"
-              "<form method='POST' action='/fw/update'>"
-              "<button type='submit' class='btn'>Install Update</button>"
-              "</form><div class='row' style='margin-top:10px'><a class='btn' href='/fw'>Back</a></div></div>"));
+  pageWrite(F("</p>"));
+
+#if defined(ESP8266)
+  // Remote HTTPS OTA is not viable on ESP8266: the BearSSL TLS stack (~10 KB),
+  // the Update sector buffer (4 KB), and the LwIP TCP receive window all compete
+  // for the same ~25 KB of DRAM.  Flash sector writes freeze the CPU for ~50 ms
+  // (SPI bus exclusive), during which LwIP cannot buffer incoming data — the CDN
+  // closes its send window, the connection stalls, and the device crashes or
+  // times out.  Tasmota avoids this entirely by using plain HTTP (no TLS).
+  // Solution: download the binary on a PC and upload it via the form below.
+  pageWrite(F("<p style='color:#c80;margin:8px 0'>"
+              "&#9888; Remote installation is not available on ESP8266 &mdash; "
+              "the device does not have enough RAM to sustain an HTTPS download "
+              "while writing to flash. Upload the file manually instead.</p>"
+              "<div class='row' style='margin-top:12px'>"));
+  pageWrite(F("<a class='btn' target='_blank' rel='noopener' href='"));
+  pageWrite(binUrl);   // permanent GitHub browser_download_url (no expiry)
+  pageWrite(F("'>&#8595; Download .bin</a>"
+              "<a class='btn' href='/fw' style='margin-left:8px'>Upload Firmware File</a>"
+              "</div>"));
+#else
+  // ESP32 has ample RAM — remote OTA via HTTPS works reliably.
+  pageWrite(F("<p>Update is ready to install.</p>"
+              "<div id='upg'>"
+              "<button class='btn' onclick='doUpd()'>Install Update</button>"
+              "<a class='btn' href='/fw' style='margin-left:8px'>Back</a>"
+              "</div>"
+              "<div id='prg' style='display:none'>"
+              "<table style='border-collapse:collapse;width:100%;margin-top:8px'>"
+              "<tr><td id='p1' style='padding:4px 0'>[ ] Connecting to download server</td></tr>"
+              "<tr><td id='p2' style='padding:4px 0;color:#aaa'>[ ] Downloading firmware</td></tr>"
+              "<tr><td id='p3' style='padding:4px 0;color:#aaa'>[ ] Flashing &amp; verifying</td></tr>"
+              "</table>"
+              "<div id='pres' style='margin-top:10px'></div>"
+              "</div>"
+              "<script>"
+              "var lastPhase='';"
+              "function doUpd(){"
+                "document.getElementById('upg').style.display='none';"
+                "document.getElementById('prg').style.display='block';"
+                "document.getElementById('p1').textContent='>>> Connecting to download server...';"
+                "fetch('/fw/update',{method:'POST'})"
+                ".then(function(r){"
+                  "var rd=r.body.getReader(),dc=new TextDecoder(),buf='';"
+                  "function pump(){"
+                    "rd.read().then(function(x){"
+                      "if(x.done){"
+                        "if(lastPhase==='downloading'){"
+                          "document.getElementById('p2').textContent='[..] Downloading & flashing (please wait)...';"
+                          "document.getElementById('pres').innerHTML='<p>Device is writing firmware. Will reboot automatically.<br><b>This page will redirect to Firmware page in 90 seconds.</b></p>';"
+                          "setTimeout(function(){location.href='/fw';},90000);"
+                        "}"
+                        "return;"
+                      "}"
+                      "buf+=dc.decode(x.value,{stream:true});"
+                      "var parts=buf.split('\\n\\n');"
+                      "buf=parts.pop();"
+                      "parts.forEach(function(p){"
+                        "if(p.slice(0,6)==='data: '){"
+                          "try{onEvt(JSON.parse(p.slice(6)));}catch(e){}"
+                        "}"
+                      "});"
+                      "pump();"
+                    "});"
+                  "}"
+                  "pump();"
+                "})"
+                ".catch(function(e){"
+                  "document.getElementById('pres').innerHTML='<span style=color:red>Connection error: '+e+'</span>';"
+                "});"
+              "}"
+              "function onEvt(d){"
+                "var p=d.phase;lastPhase=p;"
+                "if(p==='resolving'){"
+                  "document.getElementById('p1').textContent='>>> Connecting to download server...';"
+                  "document.getElementById('p1').style.color='';"
+                "}else if(p==='downloading'){"
+                  "document.getElementById('p1').textContent='[OK] Connected';"
+                  "document.getElementById('p1').style.color='green';"
+                  "document.getElementById('p2').textContent='>>> Downloading firmware...';"
+                  "document.getElementById('p2').style.color='';"
+                "}else if(p==='success'){"
+                  "document.getElementById('p2').textContent='[OK] Downloaded';"
+                  "document.getElementById('p2').style.color='green';"
+                  "document.getElementById('p3').textContent='[OK] Flash complete!';"
+                  "document.getElementById('p3').style.color='green';"
+                  "document.getElementById('pres').innerHTML='<b>Update successful!</b> Device is rebooting&hellip; Redirecting in 15s.';"
+                  "setTimeout(function(){location.href='/';},15000);"
+                "}else if(p==='failed'){"
+                  "document.getElementById('pres').innerHTML='<span style=color:red><b>Failed:</b> '+d.error+'</span>&nbsp;<a class=btn href=/fw>Back</a>';"
+                "}"
+              "}"
+              "</script>"));
+#endif
+
+  pageWrite(F("</div>"));
   pageEnd();
 }
 
 static void handleFwDoUpdate() {
+  // ---- STEP 0: prove handler was entered ----
+  Serial.println(F("[OTA] A: handler entered"));
+  Serial.flush();
+
   if (!gPendingUpdateUrl.length() || !gPendingUpdateTag.length()) {
     pageBegin("Firmware Update");
     pageWrite(F("<div class='card'><div class='title'>No Pending Update</div>"
@@ -1160,21 +1256,278 @@ static void handleFwDoUpdate() {
     return;
   }
 
+  gOtaPhase = FWOTA_IDLE;
+  gOtaError = "";
+
+  Serial.print(F("[OTA] B: tag="));
+  Serial.print(gPendingUpdateTag);
+  Serial.print(F(" heap="));
+  Serial.print(ESP.getFreeHeap());
+  Serial.print(F(" maxBlock="));
+  Serial.println(ESP.getMaxFreeBlockSize());
+  Serial.flush();
+
+  // Send the SSE "downloading" event as a complete fixed-length response so
+  // the browser JS starts its 90-second countdown immediately.
+  server.sendHeader("Cache-Control", "no-cache");
+  server.send(200, "text/event-stream", "data: {\"phase\":\"downloading\"}\n\n");
+
+  Serial.println(F("[OTA] C: response sent"));
+  Serial.flush();
+
+  // Close the web-server TCP connection so LwIP reclaims its TCP buffers
+  // (~3-4 KB) before BearSSL allocates its TLS session.  Without this the
+  // download connection hits a "Stream Read Timeout" due to heap exhaustion.
+  // Using a scoped copy: server.client() returns WiFiClient by value; both the
+  // copy and server._currentClient share the same underlying ClientContext via
+  // shared_ptr, so stop() on the copy closes the real socket.  When
+  // server.handleClient() calls _currentClient.stop() afterwards it is a no-op.
+  {
+    WiFiClient cl = server.client();
+    if (cl) cl.stop();
+  }
+  delay(150);   // let LwIP finish the TCP teardown before allocating BearSSL
+
+  Serial.println(F("[OTA] C2: server conn closed"));
+  Serial.flush();
+
   String current = normalizeVersion(String(HA_SW_VERSION));
+
+  // ── Free memory BEFORE the heap check ───────────────────────────────────────
+  // logs_clear() and mqtt.disconnect() together reclaim 4-6 KB.  The check
+  // must come AFTER these steps — running it before always fails because the
+  // heap looks tight until these are freed.
+  Serial.println(F("[OTA] E: clearing log buffer + disconnecting MQTT"));
+  Serial.flush();
+  logs_clear();
+
+  if (mqtt.connected()) {
+    mqtt.disconnect();
+    delay(100);   // let LwIP finish TCP teardown
+  }
+
+  Serial.print(F("[OTA] F: heap="));
+  Serial.print(ESP.getFreeHeap());
+  Serial.print(F(" maxBlock="));
+  Serial.println(ESP.getMaxFreeBlockSize());
+  Serial.flush();
+
+  // Check AFTER cleanup — 7 KB threshold matches our actual setBufferSizes(2048,512) need.
   String failReason;
-  if (runOtaFromUrl(gPendingUpdateUrl, current, failReason)) {
-    sendRebootingPage("Update Successful",
-                      (String("Installed release ") + gPendingUpdateTag + ". Rebooting...").c_str(),
-                      10, 1200);
-    scheduleReboot(1200);
+  if (!checkHeapForTls(failReason)) {
+    Serial.print(F("[OTA] D: heap fail: "));
+    Serial.println(failReason);
+    Serial.flush();
+    gOtaPhase = FWOTA_FAILED;
+    gOtaError = failReason;
     return;
   }
 
-  pageBegin("Firmware Update");
-  pageWrite(F("<div class='card'><div class='title'>Update Failed</div><p>Update download/apply failed. "));
-  pageWrite(failReason);
-  pageWrite(F("</p><a class='btn' href='/fw'>Back</a></div>"));
-  pageEnd();
+#if defined(ESP8266)
+  // ── Step 1: CDN URL was pre-resolved in handleFwCheckUpdate() ────────────────
+  // Redirect resolution has been moved to the check phase so BearSSL teardown
+  // fragmentation occurs before this handler runs.  By the time the user clicks
+  // Install the heap has consolidated across requests.
+  // NOTE: the CDN signed URL carries a ~1-hour expiry; if the user waits longer
+  // than that before clicking Install, the CDN may return 403 — re-run Check.
+  String finalUrl = gPendingUpdateUrl;
+
+  Serial.print(F("[OTA] G4: URL pre-resolved heap="));
+  Serial.print(ESP.getFreeHeap());
+  Serial.print(F(" maxBlock="));
+  Serial.println(ESP.getMaxFreeBlockSize());
+  Serial.flush();
+
+  // ── Step 1b: begin the flash Update NOW, before opening the TLS session ──────
+  // Update.begin() allocates a 4096-byte internal sector buffer on the heap.
+  // If we call it after the TLS handshake (as before), only ~3.5 KB remains for
+  // LwIP, which starves the TCP receive window and stalls the download at ~49 KB.
+  // Calling begin() here, while the heap is clean, leaves ~11 KB for LwIP during
+  // the stream — enough to sustain the full 587 KB download without stalling.
+  // gPendingUpdateSize is the asset byte count from the GitHub API response
+  // (fetched during Check for Updates), so we have the exact size up front.
+  {
+    uint32_t maxSketch = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+    size_t beginSize = (gPendingUpdateSize > 0)
+                     ? (size_t)gPendingUpdateSize
+                     : (size_t)maxSketch;
+
+    Serial.print(F("[OTA] G4b: pre-begin errCode="));
+    Serial.println((int)Update.getError());
+    Serial.flush();
+
+    bool beginOk = Update.begin(beginSize, U_FLASH) && !Update.hasError();
+
+    Serial.print(F("[OTA] G4c: beginOk="));
+    Serial.print(beginOk ? 1 : 0);
+    Serial.print(F(" size="));
+    Serial.print((unsigned)beginSize);
+    Serial.print(F(" heap="));
+    Serial.print(ESP.getFreeHeap());
+    Serial.print(F(" maxBlock="));
+    Serial.println(ESP.getMaxFreeBlockSize());
+    Serial.flush();
+
+    if (!beginOk) {
+      gOtaPhase = FWOTA_FAILED;
+      gOtaError = "begin() err " + String((int)Update.getError());
+      return;
+    }
+  }
+
+  // Log progress every 16 KB via the Update library's own callback.
+  Update.onProgress([](size_t done, size_t total) {
+    if (done == 0 || done == total || (done & 0x3FFF) < 256) {
+      Serial.print(F("[OTA] Progress: "));
+      Serial.print((unsigned)(done  / 1024));
+      Serial.print(F(" / "));
+      Serial.print((unsigned)(total / 1024));
+      Serial.println(F(" KB"));
+      Serial.flush();
+    }
+  });
+
+  // ── Step 2: disable WiFi modem sleep so the TCP connection stays alive ───────
+  // With modem sleep enabled the ESP8266 misses beacon windows and drops TCP
+  // ACKs → the CDN stalls and the download stops at a random offset.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  delay(50);
+
+  // ── Step 3: fresh TLS session → download directly from the resolved CDN URL ─
+  // setBufferSizes(2048, 512): GitHub's CDN does not support MFLN 512 — it sends
+  // certificate records > 512 bytes during the handshake, causing BearSSL to abort
+  // with connection-lost when a smaller buffer is negotiated.  2048 is the smallest
+  // fragment size that works reliably with this CDN.  The 2048-byte iobuf_in is now
+  // allocated AFTER Update.begin() has already been called (above), so the flash
+  // sector buffer (4096 B) is no longer competing with BearSSL for the same pool
+  // of free memory — leaving ~7–8 KB for LwIP pbufs during the stream (was ~3.5 KB).
+  WiFiClientSecure secureClient;
+  secureClient.setTimeout(30000);
+  secureClient.setInsecure();
+  secureClient.setBufferSizes(2048, 512);
+
+  Serial.print(F("[OTA] G5: heap="));
+  Serial.print(ESP.getFreeHeap());
+  Serial.print(F(" maxBlock="));
+  Serial.println(ESP.getMaxFreeBlockSize());
+  Serial.flush();
+
+  HTTPClient http;
+  http.begin(secureClient, finalUrl);
+
+  Serial.println(F("[OTA] H: GET from CDN..."));
+  Serial.flush();
+
+  int httpCode = http.GET();
+  int contentLength = http.getSize();
+
+  Serial.print(F("[OTA] H2: HTTP "));
+  Serial.print(httpCode);
+  Serial.print(F("  size="));
+  Serial.println(contentLength);
+  Serial.flush();
+
+  bool otaOk = false;
+  gOtaError = "";
+
+  if (httpCode == HTTP_CODE_OK) {
+    Serial.print(F("[OTA] H3: heap="));
+    Serial.print(ESP.getFreeHeap());
+    Serial.print(F(" remaining="));
+    Serial.println((unsigned)Update.remaining());
+    Serial.flush();
+
+    // Update.writeStream() calls data.read() (no timeout) as its very first
+    // operation for the magic-byte check.  If the firmware body hasn't arrived
+    // in the BearSSL buffer yet, read() returns -1, which the library maps to
+    // UPDATE_ERROR_NO_PARTITION (10).  Wait here until at least 1 byte is
+    // ready so the magic-byte read succeeds.
+    WiFiClient* dlStream = http.getStreamPtr();
+    {
+      unsigned long t0 = millis();
+      while (dlStream->available() == 0) {
+        if (millis() - t0 > 10000) break;   // 10 s safety cap
+        yield();
+        delay(10);
+      }
+      Serial.print(F("[OTA] H3d: stream avail="));
+      Serial.println(dlStream->available());
+      Serial.flush();
+    }
+
+    size_t written = Update.writeStream(*dlStream);
+
+    Serial.print(F("[OTA] H4: written="));
+    Serial.print((unsigned)written);
+    Serial.print(F(" / "));
+    Serial.print(contentLength);
+    Serial.print(F("  errCode="));
+    Serial.println((int)Update.getError());
+    Serial.flush();
+
+    if (Update.hasError()) {
+      gOtaError = "Flash err " + String((int)Update.getError());
+      Update.end(false);
+    } else if (contentLength > 0 && written != (size_t)contentLength) {
+      gOtaError = "Short read: ";
+      gOtaError += (unsigned)written;
+      gOtaError += " of ";
+      gOtaError += contentLength;
+      Update.end(false);
+    } else {
+      // written == contentLength (or contentLength unknown).
+      // Use end(true) to allow remaining()>0 when gPendingUpdateSize happened
+      // to differ slightly from contentLength — either case, we have all bytes.
+      if (Update.end(true)) {
+        otaOk = true;
+      } else {
+        gOtaError = "end() err " + String((int)Update.getError());
+      }
+    }
+  } else if (httpCode == HTTP_CODE_NOT_MODIFIED) {
+    gOtaError = F("304 — version already matches");
+    Update.end(false);
+  } else {
+    gOtaError = String(F("HTTP ")) + httpCode;
+    if (httpCode == 403 || httpCode == 401)
+      gOtaError += F(" (CDN URL may have expired — re-run Check for Updates)");
+    Update.end(false);
+  }
+
+  http.end();
+
+  // Restore modem sleep after download (reboot is coming anyway, but be tidy)
+  WiFi.setSleepMode(WIFI_MODEM_SLEEP);
+
+  Serial.print(F("[OTA] I: "));
+  Serial.println(otaOk ? F("OK") : gOtaError);
+  Serial.flush();
+
+  if (otaOk) {
+    gOtaPhase = FWOTA_SUCCESS;
+    Serial.println(F("[OTA] J: Flash OK! Rebooting..."));
+    Serial.flush();
+    scheduleReboot(1500);
+  } else if (httpCode == HTTP_CODE_NOT_MODIFIED) {
+    gOtaPhase = FWOTA_FAILED;
+    Serial.println(F("[OTA] J: no update needed (304)."));
+    Serial.flush();
+  } else {
+    gOtaPhase = FWOTA_FAILED;
+    Serial.print(F("[OTA] J: FAILED: "));
+    Serial.println(gOtaError);
+    Serial.print(F("[OTA]    heap="));
+    Serial.print(ESP.getFreeHeap());
+    Serial.print(F(" maxBlock="));
+    Serial.println(ESP.getMaxFreeBlockSize());
+    Serial.flush();
+  }
+
+#else
+  gOtaFinalUrl       = gPendingUpdateUrl;
+  gOtaCurrentVersion = current;
+  gOtaPending        = true;
+#endif
 }
 
 static void handleFwUpload() {
@@ -1339,6 +1692,50 @@ void handleRestoreBackupPost() {
   if (server.client()) { server.client().flush(); }
   delay(150);
   scheduleReboot(2200);
+}
+
+// ---------- deferred OTA download (runs in main loop) ----------
+// On ESP8266 this is a no-op: OTA runs directly inside handleFwDoUpdate().
+// On ESP32 this handles the deferred download triggered by that handler.
+void webOtaLoop() {
+#if defined(ESP8266)
+  // Nothing to do — ESP8266 OTA is done synchronously in the HTTP handler.
+  (void)gOtaPending;
+  return;
+#else
+  if (!gOtaPending) return;
+  gOtaPending = false;
+
+  LOGF("[OTA] === Deferred download starting (ESP32) ===\n");
+  LOGF("[OTA] URL: %s\n", gOtaFinalUrl.c_str());
+  LOGF("[OTA] Current ver: %s\n", gOtaCurrentVersion.c_str());
+
+  WiFiClientSecure secureClient;
+  secureClient.setTimeout(90000);
+  {
+    static const String ca = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
+    secureClient.setCACert(ca.c_str());
+  }
+  LOGF("[OTA] Calling httpUpdate.update()...\n");
+  httpUpdate.rebootOnUpdate(false);
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  t_httpUpdate_return result = httpUpdate.update(secureClient, gOtaFinalUrl, gOtaCurrentVersion);
+  LOGF("[OTA] update() returned %d\n", (int)result);
+
+  if (result == HTTP_UPDATE_OK) {
+    gOtaPhase = FWOTA_SUCCESS;
+    LOGLN("[OTA] Flash OK — rebooting");
+    scheduleReboot(1500);
+  } else {
+    gOtaError = httpUpdate.getLastErrorString()
+              + " (err " + String(httpUpdate.getLastError()) + ")";
+    gOtaPhase = FWOTA_FAILED;
+    LOGF("[OTA] FAILED: %s\n", gOtaError.c_str());
+  }
+
+  gOtaFinalUrl       = String();
+  gOtaCurrentVersion = String();
+#endif
 }
 
 // ---------- firmware upgrade from Web ----------

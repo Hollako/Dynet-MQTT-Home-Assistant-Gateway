@@ -188,6 +188,7 @@ void handleRegenPost(); // here used to force rediscovery
 void handleRestoreBackupUpload();
 void handleRestoreBackupPost();
 void sendRebootingPage(const String& title, const String& detail, int countdownSec = 10, uint32_t startPollDelayMs = 5000);
+void webOtaLoop();   // deferred OTA download — call every loop() iteration
 
 // Dynet stack
 void dynetSetup();

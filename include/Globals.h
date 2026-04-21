@@ -196,9 +196,11 @@ void dynetLoop();
 void dynetRequestAllKnownLevels(uint8_t area);
 
 // One‑shot area sweep (triggered from WebUI)
-extern volatile bool         areasSweepActive;   // true while sweeping
-extern volatile uint8_t      areasSweepArea;     // next area to poll (1..N)
-extern volatile unsigned long areasSweepNextAt;  // pacing timestamp (ms)
+extern volatile bool          areasSweepActive;    // true while sweeping
+extern volatile uint8_t       areasSweepArea;      // next area to poll (2..N)
+extern volatile uint8_t       areasSweepChannel;   // next channel within area (0..maxCh-1)
+extern volatile uint8_t       areasSweepPass;      // passes remaining (0 = last pass)
+extern volatile unsigned long areasSweepNextAt;    // earliest time for next request (ms)
 
 // Persistence APIs (ConfigStore.cpp)
 bool loadConfig();

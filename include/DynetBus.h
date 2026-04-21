@@ -44,6 +44,10 @@ public:
 
   void requestSync(uint8_t area, uint32_t durationMs = 15000);
 
+  // Non-blocking deferred level-request queue — processed one-per-call in pollAreas()
+  void scheduleLevelReq(uint8_t area, uint8_t ch0, uint32_t afterMs);
+  void scheduleAreaLevelReqs(uint8_t area, uint32_t baseAfterMs = 400);
+
 private:
   void write8(const uint8_t f[8]);
   static uint8_t checksum(const uint8_t f[8]); // sum of first 7 bytes (placeholder)
@@ -55,6 +59,12 @@ private:
   uint8_t  _syncAreaHint = 0;   // 0 = round robin
   uint8_t  _rrArea = 2;
   uint32_t _nextPresetPollAt = 0;
+
+  // Deferred level-request queue
+  struct LvlReq { uint8_t area; uint8_t ch0; uint32_t sendAt; };
+  static const uint8_t LVLQ_SIZE = 64;
+  LvlReq   _lvlQ[64] = {};
+  uint8_t  _lvlQCount = 0;
 
 };
 

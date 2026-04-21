@@ -122,37 +122,117 @@ void DynetBus::loop() {
   }
 }
 
+// -------- Deferred level-request queue --------
+void DynetBus::scheduleLevelReq(uint8_t area, uint8_t ch0, uint32_t afterMs) {
+  uint32_t sendAt = millis() + afterMs;
+  // Deduplicate: if same area+ch0 already queued, keep the earlier sendAt
+  for (uint8_t i = 0; i < _lvlQCount; i++) {
+    if (_lvlQ[i].area == area && _lvlQ[i].ch0 == ch0) {
+      if ((int32_t)(sendAt - _lvlQ[i].sendAt) < 0) _lvlQ[i].sendAt = sendAt;
+      return;
+    }
+  }
+  if (_lvlQCount >= LVLQ_SIZE) return; // queue full — drop
+  _lvlQ[_lvlQCount++] = {area, ch0, sendAt};
+}
+
+void DynetBus::scheduleAreaLevelReqs(uint8_t area, uint32_t baseAfterMs) {
+  using namespace DynetEntities;
+  uint32_t base = millis() + baseAfterMs;
+  int slot = 0;
+  for (int i = 0; i < em.channelsCount(); i++) {
+    const auto& c = em.channelAt(i);
+    if (c.present && c.area == area) {
+      scheduleLevelReq(area, c.channel0, base + (uint32_t)(slot * 80) - millis());
+      slot++;
+    }
+  }
+  if (slot == 0) {
+    // No known channels — probe first 8 to allow initial discovery
+    uint8_t maxCh = cfg.dynet_max_channels ? cfg.dynet_max_channels : 8;
+    if (maxCh > 8) maxCh = 8;
+    for (uint8_t ch = 0; ch < maxCh; ch++) {
+      scheduleLevelReq(area, ch, base + (uint32_t)(ch * 80) - millis());
+    }
+  }
+  LOGF("[DyNet] scheduled %d level req(s) for A%u after %ums\n", (slot?slot:8), area, baseAfterMs);
+}
+
 // -------- public: periodic state polling (levels sweep) --------
 void DynetBus::pollAreas() {
-  // --- Manual sweep mode (existing behavior) ---
+  // --- Manual sweep mode ---
+  // Non-blocking: sends ONE request per call, then returns so DynetBus::loop()
+  // can process UART responses before the next request.  This prevents both
+  // bus collisions (we were transmitting before the device finished responding)
+  // and SoftwareSerial buffer overflows (64-byte limit) that caused missed channels
+  // when the old code fired all requests in a tight delay(2) loop.
+  // Runs up to 3 automatic passes so transient misses are caught on the next round.
+
+  // ── Process one deferred level-request queue item ──────────────────────
+  if (_lvlQCount > 0) {
+    uint32_t now = millis();
+    uint8_t best = 0xFF;
+    for (uint8_t i = 0; i < _lvlQCount; i++) {
+      if ((int32_t)(now - _lvlQ[i].sendAt) >= 0) {
+        if (best == 0xFF || (int32_t)(_lvlQ[i].sendAt - _lvlQ[best].sendAt) < 0)
+          best = i;
+      }
+    }
+    if (best != 0xFF) {
+      sendRequestChannelLevel(_lvlQ[best].area, _lvlQ[best].ch0);
+      _lvlQ[best] = _lvlQ[--_lvlQCount]; // compact
+      return; // one TX per call to avoid bus collisions
+    }
+  }
+
   if (areasSweepActive) {
-    if (millis() < areasSweepNextAt) return;
+    if ((int32_t)(millis() - areasSweepNextAt) < 0) return;  // not time yet
 
     const uint8_t maxAreas = (cfg.dynet_max_areas    ? cfg.dynet_max_areas    : (uint8_t)DYNET_MAX_AREAS);
     const uint8_t maxCh    = (cfg.dynet_max_channels ? cfg.dynet_max_channels : (uint8_t)DYNET_MAX_CHANNELS);
 
-    uint8_t a = areasSweepArea;
-    if (a < 2) a = 2;
+    uint8_t a  = areasSweepArea;
+    uint8_t ch = areasSweepChannel;
+    if (a < 2) { a = 2; areasSweepArea = 2; }
 
+    // End of this pass?
     if (a > maxAreas) {
-      areasSweepActive = false;
-      areasSweepArea   = 2;
+      if (areasSweepPass > 0) {
+        areasSweepPass--;
+        areasSweepArea    = 2;
+        areasSweepChannel = 0;
+        areasSweepNextAt  = millis() + 500;   // brief pause between passes
+        LOGF("[DyNet] sweep pass done, %u pass(es) remaining\n", (unsigned)areasSweepPass);
+      } else {
+        areasSweepActive  = false;
+        areasSweepArea    = 2;
+        areasSweepChannel = 0;
+        LOGF("[DyNet] sweep complete\n");
+      }
       return;
     }
 
-    requestPreset(a);
-    for (uint8_t ch = 0; ch < maxCh; ++ch) {
-      sendRequestChannelLevel(a, ch);
-      delay(2);
+    // First channel of this area: also send a preset request
+    if (ch == 0) {
+      requestPreset(a);
+      LOGF("[DyNet] sweep pass=%u A%u ch 0..%u\n",
+           (unsigned)areasSweepPass, (unsigned)a, (unsigned)(maxCh - 1));
     }
-    LOGF("[DyNet] sweep area=%u requested=%u channels\n", a, maxCh);
 
-    areasSweepArea = (uint8_t)(a + 1);
-    if (areasSweepArea > maxAreas) {
-      areasSweepActive = false;
-      areasSweepArea   = 2;
+    sendRequestChannelLevel(a, ch);
+
+    // Advance to next channel / area
+    ch++;
+    if (ch >= maxCh) {
+      areasSweepArea    = a + 1;
+      areasSweepChannel = 0;
+    } else {
+      areasSweepChannel = ch;
     }
-    areasSweepNextAt = millis() + 1000;
+
+    // 80 ms between requests:  ~8.3 ms TX  +  ~30 ms device processing  +  ~8.3 ms response TX
+    // = ~47 ms minimum; 80 ms gives comfortable margin at 9600 baud.
+    areasSweepNextAt = millis() + 80;
     return;
   }
 

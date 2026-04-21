@@ -73,6 +73,14 @@ static void retireOppositeDiscovery(uint8_t area, uint8_t ch0, DynetEntities::En
   mqtt.publish(t.c_str(), "", true);
 }
 
+// Returns user-defined area name if set, otherwise "Area N"
+static String areaDisplayName(uint8_t area) {
+  using namespace DynetEntities;
+  int ai = em.findArea(area);
+  if (ai >= 0 && em.areaAt(ai).name[0]) return String(em.areaAt(ai).name);
+  return String("Area ") + String(area);
+}
+
 // ---- HA Discovery ------------------------------------------------
 // Light (JSON schema) or Switch; we choose by entity.type
 static void publishHADiscovery_LightOrSwitch(const DynetEntities::ChannelState& chs) {
@@ -121,7 +129,7 @@ static void publishHADiscovery_TempSensor(uint8_t area) {
   String objId = String("a") + String(area) + "_temp";
   String discTopic = String(HA_DISCOVERY_PREFIX) + "/sensor/" + sid + "/" + objId + "/config";
   DynamicJsonDocument doc(512);
-  doc["name"]               = String("Area ") + area + " Temperature";
+  doc["name"]               = areaDisplayName(area) + " Temperature";
   doc["unique_id"]          = sid + "_" + objId;
   doc["state_topic"]        = areaBaseTopic(area) + "/temperature";
   doc["unit_of_measurement"] = "°C";
@@ -138,7 +146,7 @@ static void publishHADiscovery_SetpointNumber(uint8_t area) {
   String objId = String("a") + String(area) + "_setpoint";
   String discTopic = String(HA_DISCOVERY_PREFIX) + "/number/" + sid + "/" + objId + "/config";
   DynamicJsonDocument doc(512);
-  doc["name"]               = String("Area ") + area + " Setpoint";
+  doc["name"]               = areaDisplayName(area) + " Setpoint";
   doc["unique_id"]          = sid + "_" + objId;
   doc["command_topic"]      = areaBaseTopic(area) + "/setpoint/set";
   doc["state_topic"]        = areaBaseTopic(area) + "/setpoint";
@@ -157,7 +165,7 @@ static void publishHADiscovery_PresetSelect(uint8_t area) {
   String discTopic = String(HA_DISCOVERY_PREFIX) + "/select/" + sid + "/" + objId + "/config";
 
   DynamicJsonDocument doc(768);
-  doc["name"]               = String("Area ") + area + " Preset";
+  doc["name"]               = areaDisplayName(area) + " Preset";
   doc["unique_id"]          = sid + "_" + objId;
   doc["command_topic"]      = areaBaseTopic(area) + "/preset/set";
   doc["state_topic"]        = areaBaseTopic(area) + "/preset";
@@ -186,7 +194,9 @@ void publishHADiscoveryForChannel(int idx) {
   DynamicJsonDocument doc(512);
   addHadeviceBlockForArea(doc, chs.area);          // your existing helper
   doc["unique_id"] = sid + "_" + objId;
-  doc["name"]      = String("Area ") + chs.area + " Ch " + (chs.channel0 + 1);
+  doc["name"]      = (chs.name[0])
+                   ? String(chs.name)
+                   : (String("Area ") + chs.area + " Ch " + (chs.channel0 + 1));
   String base      = channelBaseTopic(chs.area, chs.channel0);
   doc["state_topic"]   = base + "/state";
   doc["availability_topic"] = availabilityTopic();       // if you have a helper; else set availability_topic + payloads
@@ -224,7 +234,7 @@ void publishHADiscoveryForArea(uint8_t area) {
     String objId = String("a") + String(area) + "_save_preset";
     String discTopic = String(HA_DISCOVERY_PREFIX) + "/button/" + sid + "/" + objId + "/config";
     DynamicJsonDocument doc(512);
-    doc["name"]               = String("Area ") + area + " Save Preset";
+    doc["name"]               = areaDisplayName(area) + " Save Preset";
     doc["unique_id"]          = sid + "_" + objId;
     doc["command_topic"]      = areaBaseTopic(area) + "/save_preset";
     doc["payload_press"]      = "PRESS";
@@ -234,6 +244,39 @@ void publishHADiscoveryForArea(uint8_t area) {
     mqtt.publish(discTopic.c_str(), payload.c_str(), true);
   }
   publishHADiscovery_PresetSelect(area);
+}
+
+// ---- HA Discovery removal ---------------------------------------
+// Publish empty retained payloads to the discovery topics to remove
+// entities from Home Assistant when a channel or area is manually deleted.
+
+void removeHADiscoveryForChannel(uint8_t area, uint8_t ch0, DynetEntities::EntityType type) {
+  if (!mqtt.connected()) return;
+  String sid   = mqttSafeId(deviceId);
+  String objId = String("a") + String(area) + "_c" + String(ch0);
+  // Remove whichever component type is currently registered
+  const char* comp = (type == DynetEntities::SWITCH_ONOFF) ? "switch" : "light";
+  String t = String(HA_DISCOVERY_PREFIX) + "/" + comp + "/" + sid + "/" + objId + "/config";
+  mqtt.publish(t.c_str(), "", true);
+  // Also clear the opposite in case type was ever changed
+  const char* opp = (type == DynetEntities::SWITCH_ONOFF) ? "light" : "switch";
+  String t2 = String(HA_DISCOVERY_PREFIX) + "/" + opp + "/" + sid + "/" + objId + "/config";
+  mqtt.publish(t2.c_str(), "", true);
+  LOGF("[HA] removed discovery for A%u C%u\n", area, ch0);
+}
+
+void removeHADiscoveryForArea(uint8_t area) {
+  if (!mqtt.connected()) return;
+  String sid = mqttSafeId(deviceId);
+  // sensor (temperature)
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/sensor/"  + sid + "/a" + area + "_temp/config").c_str(),        "", true);
+  // number (setpoint)
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/number/"  + sid + "/a" + area + "_setpoint/config").c_str(),    "", true);
+  // button (save preset)
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/button/"  + sid + "/a" + area + "_save_preset/config").c_str(), "", true);
+  // select (preset)
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/select/"  + sid + "/a" + area + "_preset/config").c_str(),      "", true);
+  LOGF("[HA] removed discovery for Area %u\n", area);
 }
 
 // ---- State Publishers -------------------------------------------
@@ -359,14 +402,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     int preset = msg.toInt();
     if (preset >= 1 && preset <= 16) {
       dynet.sendAreaPreset((uint8_t)area, (uint8_t)preset, 0);
+      dynet.sendRequestPreset((uint8_t)area);            // immediate — single write, no blocking
+      dynet.scheduleAreaLevelReqs((uint8_t)area, 500);  // non-blocking level refresh
+      // Optimistic UI update
       using namespace DynetEntities;
-      // Request actual preset + levels
-      delay(120);
-      dynet.sendRequestPreset((uint8_t)area);              // 0x63
-      delay(120);
-      em.requestLevelsForArea(area, DYNET_MAX_CHANNELS);  // 0x61 per channel
-
-      // Optional optimistic UI update (can keep it)
       em.noteReportPreset((uint8_t)area, (uint8_t)(preset - 1));
       publishPresetForArea((uint8_t)area);
     }
@@ -389,8 +428,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     #endif
     ;
     for (uint8_t ch = 0; ch < COUNT; ++ch) {
-      dynet.sendRequestChannelLevel((uint8_t)area, ch);
-      delay(2);
+      dynet.scheduleLevelReq((uint8_t)area, ch, 200 + (uint32_t)ch * 80);
     }
     return;
   }
@@ -437,8 +475,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       dynet.sendFadeToLevel_1s((uint8_t)area, (uint8_t)ch, pct, 0x02);
       em.setChannelLevel((uint8_t)area, (uint8_t)ch, pct);
       publishStateForChannel(idx);
-      delay(180);
-      dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+      dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 400);
       return;
     } else {
       // Dimmable Light: JSON schema or simple forms
@@ -450,24 +487,21 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
           dynet.sendFadeToLevel_1s((uint8_t)area, (uint8_t)ch, 100, 0x02);
           em.setChannelLevel((uint8_t)area, (uint8_t)ch, 100);
           publishStateForChannel(idx);
-          delay(180);
-          dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+          dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 400);
           return;
         }
         if (msg.equalsIgnoreCase("OFF")) {
           dynet.sendFadeToLevel_1s((uint8_t)area, (uint8_t)ch,   0, 0x02);
           em.setChannelLevel((uint8_t)area, (uint8_t)ch, 0);
           publishStateForChannel(idx);
-          delay(180);
-          dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+          dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 400);
           return;
         }
         int pct = constrain(msg.toInt(), 0, 100);
         dynet.sendFadeToLevel_1s((uint8_t)area, (uint8_t)ch, pct, 0x02);
         em.setChannelLevel((uint8_t)area, (uint8_t)ch, pct);
         publishStateForChannel(idx);
-        delay(180);
-        dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+        dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 400);
         return;
       }
 
@@ -480,8 +514,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
           dynet.sendFadeToLevel_1s((uint8_t)area, (uint8_t)ch, 0, 0x02);
           em.setChannelLevel((uint8_t)area, (uint8_t)ch, 0);
           publishStateForChannel(idx);
-          delay(180);
-          dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+          dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 400);
           return;
         } else if (!strcasecmp(st, "ON")) {
           if (haveBri && bri >= 0) {
@@ -489,15 +522,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             dynet.sendFadeToLevel_1s((uint8_t)area, (uint8_t)ch, pct, 0x02);
             em.setChannelLevel((uint8_t)area, (uint8_t)ch, pct);
             publishStateForChannel(idx);
-            delay(180);
-            dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+            dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 400);
             return;
           } else {
             dynet.sendFadeToLevel_1s((uint8_t)area, (uint8_t)ch, 100, 0x02);
             em.setChannelLevel((uint8_t)area, (uint8_t)ch, 100);
             publishStateForChannel(idx);
-            delay(180);
-            dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+            dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 400);
             return;
           }
         }

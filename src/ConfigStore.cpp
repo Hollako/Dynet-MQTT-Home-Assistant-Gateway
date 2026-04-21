@@ -85,6 +85,7 @@ bool loadEntities() {
   f.close(); if (err) return false;
 
   em.begin();
+  em.setLoading(true);   // suppress publish/save inside touchArea/touchChannel
 
   // channels
   if (doc.containsKey("channels") && doc["channels"].is<JsonArray>()) {
@@ -96,8 +97,14 @@ bool loadEntities() {
       uint8_t type = (uint8_t)(v["t"]    | v["type"] | DynetEntities::LIGHT_DIMMABLE);
       if (area > 0) {
         int i = em.touchChannel(area, ch0);
-        if (i >= 0) em.setChannelType(area, ch0, (DynetEntities::EntityType)type);
-   
+        if (i >= 0) {
+          em.setChannelType(area, ch0, (DynetEntities::EntityType)type);
+          if (v.containsKey("n") && v["n"].is<const char*>()) {
+            auto& ch = em.channelAtMut(i);
+            strncpy(ch.name, (const char*)v["n"], sizeof(ch.name) - 1);
+            ch.name[sizeof(ch.name) - 1] = '\0';
+          }
+        }
       }
       delay(0);
     }
@@ -114,12 +121,21 @@ bool loadEntities() {
         if (preset != 0xFF) em.noteReportPreset(area, preset);
         if (v.containsKey("tempC"))  em.noteActualTemp_fp(area, (uint8_t)floor(fabs((double)v["tempC"])), (uint8_t)((fabs((double)v["tempC"]) - floor(fabs((double)v["tempC"]))) * 100.0));
         if (v.containsKey("setptC")) em.noteSetpoint_fp  (area, (uint8_t)floor(fabs((double)v["setptC"])), (uint8_t)((fabs((double)v["setptC"]) - floor(fabs((double)v["setptC"]))) * 100.0));
+        if (v.containsKey("n") && v["n"].is<const char*>()) {
+          int ai2 = em.findArea(area);
+          if (ai2 >= 0) {
+            auto& ar = em.areaAtMut(ai2);
+            strncpy(ar.name, (const char*)v["n"], sizeof(ar.name) - 1);
+            ar.name[sizeof(ar.name) - 1] = '\0';
+          }
+        }
       }
       delay(0);
     }
   }
-  return true;
+  em.setLoading(false);  // re-enable publish/save
   LOGF("[persist] loaded %d channels, %d areas from %s\n", em.channelsCount(), em.areasCount(), ENTITIES_FILE);
+  return true;
 }
 
 bool saveEntities() {
@@ -137,6 +153,7 @@ bool saveEntities() {
     o["a"] = c.area;
     o["c"] = c.channel0;
     o["t"] = (uint8_t)c.type;
+    if (c.name[0]) o["n"] = c.name;
     // Not saving level/isOn to avoid heavy write cycles during fades.
   }
 
@@ -150,6 +167,7 @@ bool saveEntities() {
     o["p"] = a.preset0;               // last-known preset (0xFF if unknown)
     if (a.hasTemp)  o["tempC"]  = a.tempC;
     if (a.hasSetpt) o["setptC"] = a.setptC;
+    if (a.name[0])  o["n"]      = a.name;
   }
 
   String out; serializeJson(doc, out);

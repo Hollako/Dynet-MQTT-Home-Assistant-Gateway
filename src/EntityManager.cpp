@@ -30,7 +30,9 @@ void EntityManager::begin() {
   int arCap = cfg.dynet_max_areas    ? constrain((int)cfg.dynet_max_areas,    1, (int)DYNET_MAX_AREAS)    : DYNET_MAX_AREAS;
 
   _channels = new (std::nothrow) ChannelState[chCap];
+  if (_channels) memset(_channels, 0, sizeof(ChannelState) * chCap);
   _areas    = new (std::nothrow) AreaState   [arCap];
+  if (_areas)    memset(_areas,    0, sizeof(AreaState)    * arCap);
   _chCount = 0; _arCount = 0;
   _chCap   = chCap; _arCap = arCap;       // NEW: remember capacities
 }
@@ -48,9 +50,11 @@ int EntityManager::touchArea(uint8_t area) {
   _areas[_arCount].area = area;
   _areas[_arCount].present = true;
   int created = _arCount++;
-  // NEW: publish area-level entities (temp sensor, setpoint number, save button)
-  publishHADiscoveryForArea(area);
-  saveEntities();                       
+  // Suppress publish/save during bulk load
+  if (!_loading) {
+    publishHADiscoveryForArea(area);
+    saveEntities();
+  }
   return created;
 }
 
@@ -72,9 +76,11 @@ int EntityManager::touchChannel(uint8_t area, uint8_t channel0) {
   _channels[_chCount].levelPct = 0;
   touchArea(area);
   int created = _chCount++;
-  // NEW: publish HA discovery for this channel now
-  publishHADiscoveryForChannel(created);
-  saveEntities();                       
+  // Suppress publish/save during bulk load
+  if (!_loading) {
+    publishHADiscoveryForChannel(created);
+    saveEntities();
+  }
   return created;
 }
 
@@ -106,7 +112,9 @@ void EntityManager::setChannelOnOff(uint8_t area, uint8_t channel0, bool on) {
   }
 }
 
-extern void publishPresetForArea(uint8_t area);  // add near other externs
+extern void publishPresetForArea(uint8_t area);
+extern void removeHADiscoveryForChannel(uint8_t area, uint8_t ch0, DynetEntities::EntityType type);
+extern void removeHADiscoveryForArea(uint8_t area);
 
 void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   int a = touchArea(area);
@@ -127,16 +135,10 @@ void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   if (a >= 0 && (now - _areas[a].lastLevelReqMs) < 300) return;
   if (a >= 0) _areas[a].lastLevelReqMs = now;
 
-  // Request a full refresh of levels after preset change
-  uint8_t maxCh = cfg.dynet_max_channels ? cfg.dynet_max_channels : (uint8_t)DYNET_MAX_CHANNELS;
-  int sent = 0;
-  for (uint8_t ch = 0; ch < maxCh; ch++) {
-    dynet.sendRequestChannelLevel(area, ch);
-    delay(2);
-    sent++;
-  }
-  LOGF("[DyNet] A%u preset->P%u (was %u) => requested %d channel level(s)\n",
-       area, preset0 + 1, (prev == 0xFF ? 0 : prev + 1), sent);
+  // Schedule non-blocking level refresh after preset change (400ms settling time)
+  dynet.scheduleAreaLevelReqs(area, 400);
+  LOGF("[DyNet] A%u preset->P%u (was P%u) => scheduled level refresh\n",
+       area, preset0 + 1, (prev == 0xFF ? 0 : prev + 1));
 
   saveEntities();
 }
@@ -236,8 +238,8 @@ bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
     uint8_t preset0 = (uint8_t)(bank * 8 + idx);  // 0-origin
     noteReportPreset(area, preset0);
 
-    int sent = requestLevelsForArea(area, DYNET_MAX_CHANNELS);
-    LOGF("[DyNet] A%u preset(0x64)->P%u; requested %d level(s)\n", area, preset0 + 1, sent);
+    dynet.scheduleAreaLevelReqs(area, 400);
+    LOGF("[DyNet] A%u preset(0x64)->P%u; scheduled level refresh\n", area, preset0 + 1);
     return true;
   }
 
@@ -246,8 +248,8 @@ bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
     uint8_t preset0 = b[3];
     noteReportPreset(area, preset0);
 
-    int sent = requestLevelsForArea(area, DYNET_MAX_CHANNELS);
-    LOGF("[DyNet] A%u preset(0x65)->P%u; requested %d level(s)\n", area, preset0 + 1, sent);
+    dynet.scheduleAreaLevelReqs(area, 400);
+    LOGF("[DyNet] A%u preset(0x65)->P%u; scheduled level refresh\n", area, preset0 + 1);
     return true;
   }
 
@@ -256,8 +258,8 @@ bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
     uint8_t preset0 = b[4];
     noteReportPreset(area, preset0);
 
-    int sent = requestLevelsForArea(area, DYNET_MAX_CHANNELS);
-    LOGF("[DyNet] A%u preset(0x6B)->P%u; requested %d level(s)\n", area, preset0 + 1, sent);
+    dynet.scheduleAreaLevelReqs(area, 400);
+    LOGF("[DyNet] A%u preset(0x6B)->P%u; scheduled level refresh\n", area, preset0 + 1);
     return true;
   }
 
@@ -296,14 +298,86 @@ bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
 
       // Ensure discovery happens even if we never saw a 0x60 yet
       touchChannel(area, ch0);                 // ensure discovered
-      delay(80);                               // small settle
-      dynet.sendRequestChannelLevel(area, ch0); // 0x61 -> expect 0x60
-      LOGF("[DyNet] A%u ch%u cmd(0x%02X) -> requested level\n", area, ch0, b[3]);
+      dynet.scheduleLevelReq(area, ch0, 300);  // non-blocking: request level after 300ms
+      LOGF("[DyNet] A%u ch%u cmd(0x%02X) -> scheduled level req\n", area, ch0, b[3]);
       return true;
     }
     default: break;
   }
 
   return false;
+}
+
+// ---- Manual delete ----------------------------------------------
+
+bool EntityManager::deleteChannel(uint8_t area, uint8_t channel0) {
+  int idx = -1;
+  for (int i = 0; i < _chCount; i++) {
+    if (_channels[i].present && _channels[i].area == area && _channels[i].channel0 == channel0) {
+      idx = i; break;
+    }
+  }
+  if (idx < 0) return false;
+
+  EntityType type = _channels[idx].type;
+
+  // Remove from HA
+  removeHADiscoveryForChannel(area, channel0, type);
+
+  // Compact: swap with last element then shrink
+  if (idx != _chCount - 1) _channels[idx] = _channels[_chCount - 1];
+  _chCount--;
+
+  // If area now has no channels, remove it too
+  bool hasMore = false;
+  for (int i = 0; i < _chCount; i++) {
+    if (_channels[i].present && _channels[i].area == area) { hasMore = true; break; }
+  }
+  if (!hasMore) deleteArea(area);
+
+  saveEntities();
+  LOGF("[EM] deleted A%u C%u\n", area, channel0);
+  return true;
+}
+
+void EntityManager::setChannelName(uint8_t area, uint8_t channel0, const char* name) {
+  int idx = findChannel(area, channel0);
+  if (idx < 0) return;
+  strncpy(_channels[idx].name, name ? name : "", sizeof(_channels[idx].name) - 1);
+  _channels[idx].name[sizeof(_channels[idx].name) - 1] = '\0';
+  publishHADiscoveryForChannel(idx);  // update HA entity name
+  saveEntities();
+}
+
+void EntityManager::setAreaName(uint8_t area, const char* name) {
+  int idx = findArea(area);
+  if (idx < 0) return;
+  strncpy(_areas[idx].name, name ? name : "", sizeof(_areas[idx].name) - 1);
+  _areas[idx].name[sizeof(_areas[idx].name) - 1] = '\0';
+  publishHADiscoveryForArea(area);    // update HA entity names
+  saveEntities();
+}
+
+bool EntityManager::deleteArea(uint8_t area) {
+  // Delete all channels belonging to this area
+  for (int i = _chCount - 1; i >= 0; i--) {
+    if (_channels[i].present && _channels[i].area == area) {
+      removeHADiscoveryForChannel(area, _channels[i].channel0, _channels[i].type);
+      if (i != _chCount - 1) _channels[i] = _channels[_chCount - 1];
+      _chCount--;
+    }
+  }
+
+  // Remove the area entry
+  int ai = findArea(area);
+  if (ai >= 0) {
+    removeHADiscoveryForArea(area);
+    if (ai != _arCount - 1) _areas[ai] = _areas[_arCount - 1];
+    _arCount--;
+  }
+
+  saveEntities();
+  LOGF("[EM] deleted Area %u\n", area);
+  return (ai >= 0);
 }
 

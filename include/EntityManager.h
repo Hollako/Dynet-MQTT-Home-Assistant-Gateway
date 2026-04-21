@@ -18,6 +18,7 @@ struct ChannelState {
   bool     present   = false;
   bool     isOn      = false;
   uint8_t  levelPct  = 0;     // 0..100 derived from reports
+  char     name[25]  = {};    // user label; empty = default "Area N Ch M"
 };
 
 struct AreaState {
@@ -28,14 +29,15 @@ struct AreaState {
   float    tempC    = NAN;
   bool     hasSetpt = false;
   float    setptC   = NAN;
-  uint32_t lastLevelReqMs = 0;   // NEW: debounce refresh requests
+  uint32_t lastLevelReqMs = 0;   // debounce refresh requests
+  char     name[25] = {};   // user label; empty = default "Area N"
 };
 
 #ifndef DYNET_MAX_CHANNELS
 #define DYNET_MAX_CHANNELS 32  // was 128
 #endif
 #ifndef DYNET_MAX_AREAS
-#define DYNET_MAX_AREAS 255     // was 64
+#define DYNET_MAX_AREAS 32
 #endif
 
 class EntityManager {
@@ -61,16 +63,31 @@ public:
   void noteActualTemp_fp   (uint8_t area, uint8_t hi, uint8_t lo);
   void noteSetpoint_fp     (uint8_t area, uint8_t hi, uint8_t lo);
 
+  // Manual add / delete
+  bool deleteChannel(uint8_t area, uint8_t channel0);  // returns false if not found
+  bool deleteArea(uint8_t area);                        // deletes area + all its channels
+
+  // Name setters (persists via saveEntities + republishes HA discovery)
+  void setChannelName(uint8_t area, uint8_t channel0, const char* name);
+  void setAreaName(uint8_t area, const char* name);
+
   // Access
   inline int channelsCount() const { return _chCount; }
   inline int areasCount() const    { return _arCount; }
   const ChannelState& channelAt(int idx) const { return _channels[idx]; }
   const AreaState&    areaAt(int idx)    const { return _areas[idx]; }
+  // Mutable access (only for loading from persistent storage — no publish/save side effects)
+  ChannelState& channelAtMut(int idx) { return _channels[idx]; }
+  AreaState&    areaAtMut(int idx)    { return _areas[idx]; }
 
   // Parse a DyNet logical frame (b[0]=0x1C). Returns true if consumed.
   bool handleLogicalFrame(const uint8_t b[8]);
 
+  // Suppress publish/save side effects during bulk load (set before loadEntities, clear after)
+  void setLoading(bool v) { _loading = v; }
+
 private:
+  bool          _loading  = false;
   //ChannelState _channels[DYNET_MAX_CHANNELS];
   //AreaState    _areas[DYNET_MAX_AREAS];
   ChannelState* _channels = nullptr;

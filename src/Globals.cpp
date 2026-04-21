@@ -1,9 +1,9 @@
 #include "Globals.h"
 
 // -------------------- HA metadata --------------------
-const char* HA_MANUFACTURER = "Hollako";
+const char* HA_MANUFACTURER = "SmartWay";
 const char* HA_MODEL        = "ESPDynetGateway";
-const char* HA_SW_VERSION   = "1.5";
+const char* HA_SW_VERSION   = "1.8";
 
 // -------------------- EEPROM device_id magic ----------------
 const uint32_t DEV_ID_MAGIC = 0x44594E54; // 'DYNT'
@@ -62,9 +62,11 @@ volatile bool rediscoveryScheduled = false;
 volatile uint16_t rediscoveryPtr = 0;
 volatile unsigned long nextRediscoveryAt = 0;
 
-volatile bool         areasSweepActive = false;
-volatile uint8_t      areasSweepArea   = 2;
-volatile unsigned long areasSweepNextAt = 0;
+volatile bool          areasSweepActive  = false;
+volatile uint8_t       areasSweepArea    = 2;
+volatile uint8_t       areasSweepChannel = 0;
+volatile uint8_t       areasSweepPass    = 0;
+volatile unsigned long areasSweepNextAt  = 0;
 
 
 // -------------------- Long-press reset timing --------------------

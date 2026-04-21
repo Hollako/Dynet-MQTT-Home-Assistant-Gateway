@@ -64,7 +64,7 @@ static inline void pageBegin(const String& title) {
       ".container{padding:16px}"
       ".card{border:1px solid var(--border);border-radius:12px;padding:12px;margin:10px 0;background:var(--card)}"
       ".muted{color:var(--muted);font-size:12px}"
-      ".grid2{display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));gap:12px}"
+      ".grid2{display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));row-gap:2px;column-gap:12px}"
       "@media(max-width:900px){.grid2{grid-template-columns:1fr}}"
       ".title{font-weight:600;margin:0 0 6px}"
       ".row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}"
@@ -138,6 +138,25 @@ static inline void pageBegin(const String& title) {
 static inline void pageWrite(const __FlashStringHelper* s){ server.sendContent(s); }
 static inline void pageWrite(const String& s){ server.sendContent(s); }
 static inline void pageEnd(){ server.sendContent(F("</div></body></html>")); }
+
+// Safe helper: convert a fixed-length name buffer to an HTML-attribute-safe String.
+// - Never reads past maxLen bytes (handles non-null-terminated buffers).
+// - HTML-encodes ' " < > & so the value is safe inside value='...' attributes.
+static inline String safeAttr(const char* buf, size_t maxLen) {
+  size_t len = strnlen(buf, maxLen);   // stop at first '\0' or maxLen
+  String out;
+  out.reserve(len);
+  for (size_t i = 0; i < len; i++) {
+    char c = buf[i];
+    if      (c == '\'') out += F("&#39;");
+    else if (c == '"')  out += F("&quot;");
+    else if (c == '<')  out += F("&lt;");
+    else if (c == '>')  out += F("&gt;");
+    else if (c == '&')  out += F("&amp;");
+    else                out += c;
+  }
+  return out;
+}
 
 // ---- helpers ----
 static String gpioOpt(int gpio, const char* label, int current){
@@ -220,7 +239,7 @@ void handleRootGet() {
         "</script>"
       ));
       
-  pageWrite(F("<h1>Discovered Areas & Channels</h1>"));
+  pageWrite(F("<p style='font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:10px 0 4px'>Areas &amp; Channels</p>"));
 
   // If nothing yet, hint
   if (em.channelsCount() == 0 && em.areasCount() == 0) {
@@ -229,133 +248,180 @@ void handleRootGet() {
                 "You can also request levels from the Config page.</div>"));
   }
 
-  // Render per-area cards
-  for (int ai = 0; ai < em.areasCount(); ai++) {
+  // Render per-area cards — sorted by area number
+  for (int aNum = 1; aNum <= 255; aNum++) {
+    int ai = em.findArea((uint8_t)aNum);
+    if (ai < 0) continue;
   const AreaState& as = em.areaAt(ai);
 
   pageWrite(F("<div class='card'>"));
-    // header
-    pageWrite(F("<div class='row space'><div class='row' style='gap:10px'>"));
-      pageWrite(F("<div class='title'>"));
-        pageWrite(String("Area "));
+    // ── Area header ──────────────────────────────────────────────────────────
+    pageWrite(F("<div class='row space' style='flex-wrap:wrap;gap:6px'>"));
+      // Left: number + name input + status pills
+      pageWrite(F("<div class='row' style='gap:6px;flex-wrap:wrap;align-items:center;flex:1;min-width:0'>"));
+        pageWrite(F("<b style='white-space:nowrap'>Area "));
         pageWrite(String(as.area));
-      pageWrite(F("</div>"));
+        pageWrite(F("</b>"));
 
-      // --- Preset pill (always rendered) + stable ID for live updates
-      pageWrite(F("<span class='pill' id='preset_A"));
+        // Name input + save button
+        pageWrite(F("<input id='an_"));
         pageWrite(String(as.area));
-      pageWrite(F("'>"));
-        pageWrite(String("Preset: "));
-        pageWrite((as.preset0==0xFF) ? String("unknown") : String((int)as.preset0 + 1));
-      pageWrite(F("</span>"));
+        pageWrite(F("' class='in' type='text' placeholder='Name' maxlength='24' value='"));
+        pageWrite(as.name[0] ? safeAttr(as.name, sizeof(as.name)) : (String(F("Area ")) + String(as.area)));
+        pageWrite(F("' style='width:120px;padding:3px 6px'>"));
+        pageWrite(F("<button class='btn' style='padding:2px 14px;min-width:auto;min-height:auto;font-size:13px' title='Save area name' onclick='saveAreaName("));
+        pageWrite(String(as.area)); pageWrite(F(",\"an_")); pageWrite(String(as.area)); pageWrite(F("\")'>&#10003;</button>"));
 
-      // --- Temp pill: render hidden if not present, give it a stable ID
-      pageWrite(F("<span class='pill' id='temp_A"));
-        pageWrite(String(as.area));
-      if (as.hasTemp) {
-        pageWrite(F("'>Temp: "));
-        pageWrite(String(as.tempC,1));
-        pageWrite(F(" °C</span>"));
-      } else {
-        pageWrite(F("' style='display:none'>Temp: – °C</span>"));
+        // Status pills
+        pageWrite(F("<span class='pill' id='preset_A")); pageWrite(String(as.area));
+        pageWrite(F("'>P:&nbsp;"));
+        pageWrite((as.preset0 == 0xFF) ? String("?") : String((int)as.preset0 + 1));
+        pageWrite(F("</span>"));
+
+        pageWrite(F("<span class='pill' id='temp_A")); pageWrite(String(as.area));
+        if (as.hasTemp) { pageWrite(F("'>")); pageWrite(String(as.tempC,1)); pageWrite(F("°C</span>")); }
+        else            { pageWrite(F("' style='display:none'>–°C</span>")); }
+
+        pageWrite(F("<span class='pill' id='setpt_A")); pageWrite(String(as.area));
+        if (as.hasSetpt) { pageWrite(F("'>SP:")); pageWrite(String(as.setptC,1)); pageWrite(F("°C</span>")); }
+        else             { pageWrite(F("' style='display:none'>SP:–</span>")); }
+
+      pageWrite(F("</div>")); // left group
+
+      // Right: add-channel + delete area (small)
+      pageWrite(F("<div class='row' style='gap:4px;flex-shrink:0;align-items:center'>"));
+        pageWrite(F("<span style='font-size:12px;color:var(--muted);white-space:nowrap'>Add Channel:</span>"));
+        pageWrite(F("<input id='ac_")); pageWrite(String(as.area));
+        pageWrite(F("' type='number' class='in' min='1' max='255' placeholder='Ch#' style='width:54px;padding:3px 5px;min-width:0'>"));
+        pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addCh(")); pageWrite(String(as.area));
+        pageWrite(F(",\"ac_")); pageWrite(String(as.area)); pageWrite(F("\")'>+Ch</button>"));
+        pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 8px;min-width:auto;min-height:auto;font-size:13px' onclick='delArea("));
+        pageWrite(String(as.area)); pageWrite(F(")'>&#10006;</button>"));
+      pageWrite(F("</div>")); // right group
+
+    pageWrite(F("</div>")); // header row
+
+    // ── Area action row: preset buttons + count selector + utility buttons ──
+    pageWrite(F("<div class='row' style='margin-top:5px;flex-wrap:wrap;gap:5px;align-items:center'>"));
+
+      // Preset buttons P1..P8 (visibility controlled by JS via class 'pb' + data-p)
+      {
+        for (int p = 1; p <= 32; p++) {
+          pageWrite(F("<button class='btn action pb' data-p='"));
+          pageWrite(String(p));
+          pageWrite(F("' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick='sendPreset("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(p));
+          pageWrite(F(")'>P")); pageWrite(String(p)); pageWrite(F("</button>"));
+        }
       }
 
-      // --- Setpoint pill: render hidden if not present, give it a stable ID
-      pageWrite(F("<span class='pill' id='setpt_A"));
-        pageWrite(String(as.area));
-      if (as.hasSetpt) {
-        pageWrite(F("'>Setpoint: "));
-        pageWrite(String(as.setptC,1));
-        pageWrite(F(" °C</span>"));
-      } else {
-        pageWrite(F("' style='display:none'>Setpoint: – °C</span>"));
+      // Preset count dropdown
+      pageWrite(F("<select class='pcSel in' onchange='setPC(this.value)' title='Number of presets shown'"
+                  " style='padding:2px 4px;min-width:auto;width:auto;font-size:12px'>"));
+      for (int n = 1; n <= 32; n++) {
+        pageWrite(String("<option value='") + n + "'>" + n + "</option>");
       }
+      pageWrite(F("</select>"));
 
-    pageWrite(F("</div>"));
-    pageWrite(F("</div>"));
-    // area actions
-    pageWrite(F("<div class='row'>"
-                  "<form method='POST' action='/area/save_preset'>"
-                    "<input type='hidden' name='area' value='"));
-      pageWrite(String(as.area));
-    pageWrite(F("'>"
-                    "<button class='btn prog' type='submit'>Save Current Preset</button>"
-                  "</form>"
-                  "<button class='btn action' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
-      pageWrite(String(as.area));
-    pageWrite(F("&do=req_preset'})\">Request Preset</button>"
-              "<button class='btn action' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
-      pageWrite(String(as.area));
-    pageWrite(F("&do=req_levels'})\">Request All Channel Levels</button>"
-              "</div>"));
-    // channels grid
-    pageWrite(F("<div style='margin-top:10px' class='grid2'>"));
+      // Divider
+      pageWrite(F("<span style='width:1px;height:18px;background:var(--border);display:inline-block;margin:0 2px'></span>"));
 
-      for (int ci = 0; ci < em.channelsCount(); ci++) {
-        const ChannelState& cs = em.channelAt(ci);
-        if (cs.area != as.area || !cs.present) continue;
+      // Utility buttons
+      pageWrite(F("<form method='POST' action='/area/save_preset' style='margin:0'><input type='hidden' name='area' value='"));
+      pageWrite(String(as.area));
+      pageWrite(F("'><button class='btn prog' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' type='submit'>Save Preset</button></form>"));
+      pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
+      pageWrite(String(as.area)); pageWrite(F("&do=req_preset'})\">Req Preset</button>"));
+      pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
+      pageWrite(String(as.area)); pageWrite(F("&do=req_levels'})\">Req Levels</button>"));
 
-        pageWrite(F("<div class='card' style='padding:12px'>"));
-          pageWrite(F("<div class='row space'>"));
-            pageWrite(F("<div class='title'>"));
-              pageWrite(String("Channel "));
-              pageWrite(String((int)cs.channel0 + 1));
-            pageWrite(F("</div>"));
-            pageWrite(F("<span class='pill'>"));
-              pageWrite(String("Lvl: "));
-              pageWrite(String((int)cs.levelPct));
-              pageWrite(F("%</span>"));
-            pageWrite(F("<span class='pill'>"));
-              pageWrite(String(cs.isOn ? "ON" : "OFF"));
-            pageWrite(F("</span>"));
+    pageWrite(F("</div>")); // action row
+
+    // ── Channel cards — sorted by channel number ──────────────────────────
+    pageWrite(F("<div style='margin-top:8px;padding-top:6px' class='grid2'>"));
+
+    for (int chNum = 0; chNum <= 254; chNum++) {
+      int ci = em.findChannel((uint8_t)aNum, (uint8_t)chNum);
+      if (ci < 0) continue;
+      const ChannelState& cs = em.channelAt(ci);
+      if (!cs.present) continue;
+
+      pageWrite(F("<div class='card' style='padding:8px 8px;margin:0'>"));
+
+        // ── Row 1: Ch# · name input · ✓ · level pill · on/off pill · request · delete ──
+        pageWrite(F("<div class='row space' style='gap:4px;flex-wrap:nowrap;align-items:center'>"));
+          pageWrite(F("<div class='row' style='gap:4px;align-items:center;flex:1;min-width:0;overflow:hidden'>"));
+            pageWrite(F("<b style='white-space:nowrap;font-size:13px'>Ch&nbsp;")); pageWrite(String((int)cs.channel0+1)); pageWrite(F("</b>"));
+            pageWrite(F("<input id='cn_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
+            pageWrite(F("' class='in' type='text' placeholder='Name' maxlength='24' value='"));
+            pageWrite(cs.name[0] ? safeAttr(cs.name, sizeof(cs.name)) : (String(F("Area ")) + String(cs.area) + String(F(" Ch ")) + String((int)cs.channel0 + 1)));
+            pageWrite(F("' style='width:110px;min-width:0;padding:3px 6px;font-size:13px'>"));
+            pageWrite(F("<button class='btn' style='padding:3px 14px;min-width:auto;min-height:auto;font-size:13px' title='Save channel name' onclick='saveChName("));
+            pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
+            pageWrite(F(",\"cn_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
+            pageWrite(F("\")'>&#10003;</button>"));
+            pageWrite(F("<span class='pill' style='font-size:12px'>")); pageWrite(String((int)cs.levelPct)); pageWrite(F("%</span>"));
+            pageWrite(F("<span class='pill' style='font-size:12px'>")); pageWrite(cs.isOn ? F("ON") : F("OFF")); pageWrite(F("</span>"));
+            pageWrite(F("<button class='btn' style='background:#2980b9;color:#fff;padding:3px 9px;min-width:auto;min-height:auto;font-size:15px'"
+                        " onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                        "body:'area="));
+            pageWrite(String(cs.area)); pageWrite(F("&ch=")); pageWrite(String(cs.channel0));
+            pageWrite(F("&cmd=REQ'})\" title='Request level'>&#8635;</button>"));
           pageWrite(F("</div>"));
+          pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 9px;min-width:auto;min-height:auto;font-size:13px;flex-shrink:0' onclick='delCh("));
+          pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
+          pageWrite(F(")'>&#10006;</button>"));
+        pageWrite(F("</div>")); // row 1
 
-          // type selector
-          pageWrite(F("<form class='row' method='POST' action='/api/type' style='gap:8px;margin-top:8px'>"
-                      "<input type='hidden' name='area' value='"));
-            pageWrite(String(cs.area));
-          pageWrite(F("'><input type='hidden' name='ch' value='"));
-            pageWrite(String(cs.channel0));
-          pageWrite(F("'>"
-                      "<label>Type</label>"
-                      "<select class='in' name='type'>"));
-            auto typeOpt = [&](uint8_t v,const char* lbl){
-              String sel = (cs.type==v) ? " selected" : "";
-              pageWrite(String("<option value='")+v+"'" + sel + ">" + lbl + "</option>");
+        // ── Row 2: [Channel Type group] │ [quick control buttons] ──
+        pageWrite(F("<div class='row' style='gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center'>"));
+
+          // Channel type group: label + select + save — boxed together
+          pageWrite(F("<div style='display:flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid var(--border);border-radius:8px;flex-shrink:0'>"));
+            pageWrite(F("<span style='font-size:11px;color:var(--muted);white-space:nowrap'>Channel Type</span>"));
+            pageWrite(F("<form class='row' method='POST' action='/api/type' style='gap:4px;margin:0'>"));
+              pageWrite(F("<input type='hidden' name='area' value='")); pageWrite(String(cs.area)); pageWrite(F("'>"));
+              pageWrite(F("<input type='hidden' name='ch' value='")); pageWrite(String(cs.channel0)); pageWrite(F("'>"));
+              pageWrite(F("<select class='in' name='type' style='padding:3px 5px;min-width:auto;width:auto;font-size:13px'>"));
+              pageWrite(String("<option value='0'") + ((cs.type==0)?" selected":"") + ">Dimmable</option>");
+              pageWrite(String("<option value='1'") + ((cs.type==1)?" selected":"") + ">On/Off Light</option>");
+              pageWrite(String("<option value='2'") + ((cs.type==2)?" selected":"") + ">Switch</option>");
+              pageWrite(F("</select>"));
+              pageWrite(F("<button class='btn' type='submit' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px'>Save</button>"));
+            pageWrite(F("</form>"));
+          pageWrite(F("</div>")); // type group
+
+          // Quick control buttons
+          {
+            auto qbtn = [&](const char* cap, const char* cmd){
+              pageWrite(F("<button class='btn action' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
+              pageWrite(String(cs.area)); pageWrite(F("&ch=")); pageWrite(String(cs.channel0));
+              pageWrite(F("&cmd=")); pageWrite(cmd); pageWrite(F("'})\">"));
+              pageWrite(cap); pageWrite(F("</button>"));
             };
-            typeOpt(LIGHT_DIMMABLE,"Light (Dimmable)");
-            typeOpt(LIGHT_ONOFF,   "Light (On/Off)");
-            typeOpt(SWITCH_ONOFF,  "Switch (On/Off)");
-          pageWrite(F("</select><button class='btn' type='submit'>Save</button></form>"));
+            qbtn("ON","ON"); qbtn("OFF","OFF");
+            qbtn("25%","SET=25"); qbtn("50%","SET=50");
+            qbtn("75%","SET=75"); qbtn("100%","SET=100");
+          }
+        pageWrite(F("</div>")); // row 2
 
-          // controls
-          pageWrite(F("<div class='row' style='gap:8px;margin-top:8px'>"));
-            auto btn = [&](const char* cap, const String& body){
-              pageWrite(F("<button class='btn action' onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
-              pageWrite(String(cs.area));
-              pageWrite(F("&ch="));
-              pageWrite(String(cs.channel0));
-              pageWrite(F("&cmd="));
-              pageWrite(body);
-              pageWrite(F("'})\">"));
-              pageWrite(cap);
-              pageWrite(F("</button>"));
-            };
-            btn("ON","ON");
-            btn("OFF","OFF");
-            btn("25%","SET=25");
-            btn("50%","SET=50");
-            btn("75%","SET=75");
-            btn("100%","SET=100");
-            btn("Request","REQ");
-          pageWrite(F("</div>"));
-
-        pageWrite(F("</div>")); // channel card
-      }
+      pageWrite(F("</div>")); // channel card
+    }
 
     pageWrite(F("</div>")); // grid
   pageWrite(F("</div>"));   // area card
   }
+
+  // --- Add Area ---
+  pageWrite(F(
+    "<div class='card'>"
+      "<div class='row' style='gap:8px;align-items:center'>"
+        "<b>Add Area:</b>"
+        "<input id='add_area_num' class='in' type='number' min='2' max='255' placeholder='Area #' style='width:80px'>"
+        "<button class='btn' onclick='addArea()'>+Area</button>"
+      "</div>"
+    "</div>"
+  ));
 
   // --- Scripts: keep existing sendAP + add live pills updater ---
   pageWrite(F(
@@ -379,14 +445,14 @@ void handleRootGet() {
         // preset (+1, unknown=255)
         "const p=document.getElementById('preset_A'+id);"
         "if(p && typeof a.preset0!=='undefined'){"
-          "p.textContent='Preset: '+(a.preset0===255?'unknown':(a.preset0+1));"
+          "p.textContent='P:\u00a0'+(a.preset0===255?'?':(a.preset0+1));"
         "}"
         // temperature
         "const t=document.getElementById('temp_A'+id);"
         "if(t){"
           "if(a.hasTemp && typeof a.tempC==='number'){"
             "t.style.display='';"
-            "t.textContent='Temp: '+a.tempC.toFixed(1)+' °C';"
+            "t.textContent=a.tempC.toFixed(1)+'°C';"
           "}else{"
             "t.style.display='none';"
           "}"
@@ -396,7 +462,7 @@ void handleRootGet() {
         "if(s){"
           "if(a.hasSetpt && typeof a.setptC==='number'){"
             "s.style.display='';"
-            "s.textContent='Setpoint: '+a.setptC.toFixed(1)+' °C';"
+            "s.textContent='SP:'+a.setptC.toFixed(1)+'°C';"
           "}else{"
             "s.style.display='none';"
           "}"
@@ -409,10 +475,68 @@ void handleRootGet() {
         ".then(j=>updAreas(j.areas))"
         ".catch(()=>{});"
     "}"
+    // ---- preset buttons ----
+    "var gPC=parseInt(localStorage.getItem('pc')||'4');"
+    "function applyPC(){"
+      "document.querySelectorAll('.pb').forEach(function(b){"
+        "b.style.display=(parseInt(b.dataset.p)<=gPC)?'':'none';"
+      "});"
+      "document.querySelectorAll('.pcSel').forEach(function(s){s.value=String(gPC);});"
+    "}"
+    "function setPC(n){gPC=parseInt(n);localStorage.setItem('pc',String(gPC));applyPC();}"
+    "function sendPreset(a,p){"
+      "fetch('/api/area_preset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+a+'&preset='+p+'&fade=0'});"
+    "}"
     "window.addEventListener('DOMContentLoaded',()=>{"
       "setInterval(pollAreas,1500);"
       "pollAreas();"
+      "applyPC();"
     "});"
+    // ---- manual add/delete helpers ----
+    "function apiPost(url,body){"
+      "fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})"
+      ".then(r=>r.json()).then(j=>{if(j.ok)location.reload();else alert(j.error||'Failed');}).catch(()=>alert('Error'));"
+    "}"
+    "function saveName(url,body,btnEl){"
+      "fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})"
+      ".then(r=>r.json()).then(j=>{"
+        "if(btnEl){const t=btnEl.textContent;btnEl.textContent='✓';setTimeout(()=>{btnEl.textContent=t;},1200);}"
+      "}).catch(()=>alert('Error'));"
+    "}"
+    "function saveChName(area,ch,inputId){"
+      "const el=document.getElementById(inputId);"
+      "if(!el)return;"
+      "const v=el.value.trim();"
+      "if(!v){el.style.borderColor='#e74c3c';setTimeout(()=>{el.style.borderColor='';},1500);return;}"
+      "el.value=v;"
+      "saveName('/api/set_name','type=ch&area='+area+'&ch='+ch+'&name='+encodeURIComponent(v),el.nextElementSibling);"
+    "}"
+    "function saveAreaName(area,inputId){"
+      "const el=document.getElementById(inputId);"
+      "if(!el)return;"
+      "const v=el.value.trim();"
+      "if(!v){el.style.borderColor='#e74c3c';setTimeout(()=>{el.style.borderColor='';},1500);return;}"
+      "el.value=v;"
+      "saveName('/api/set_name','type=area&area='+area+'&name='+encodeURIComponent(v),el.nextElementSibling);"
+    "}"
+    "function delCh(area,ch){"
+      "if(!confirm('Delete Area '+area+' Channel '+(ch+1)+'?'))return;"
+      "apiPost('/api/del_channel','area='+area+'&ch='+ch);"
+    "}"
+    "function addCh(area,inputId){"
+      "const v=parseInt(document.getElementById(inputId).value);"
+      "if(!v||v<1||v>255){alert('Enter channel number 1..255');return;}"
+      "apiPost('/api/add_channel','area='+area+'&ch='+(v-1));"
+    "}"
+    "function delArea(area){"
+      "if(!confirm('Delete Area '+area+' and ALL its channels?'))return;"
+      "apiPost('/api/del_area','area='+area);"
+    "}"
+    "function addArea(){"
+      "const v=parseInt(document.getElementById('add_area_num').value);"
+      "if(!v||v<2||v>255){alert('Enter area number 2..255');return;}"
+      "apiPost('/api/add_area','area='+v);"
+    "}"
   "</script>"
   ));
 
@@ -869,6 +993,11 @@ static String gPendingUpdateTag;
 static String gPendingUpdateUrl;
 static int    gPendingUpdateSize = 0;   // asset byte count from GitHub API
 
+// Result of the last "Check for Update" — shown inline on /fw after redirect.
+// 0 = idle/no result yet, 1 = up to date, 2 = error
+static int    gCheckResult = 0;
+static String gCheckError;
+
 
 static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, String& outErr) {
   WiFiClient client;
@@ -1073,7 +1202,14 @@ static void handleFwGet() {
               "<div class='title'>Manual Firmware Update</div>"));
   pageWrite(F("<p>Current release: <b>"));
   pageWrite(String(HA_SW_VERSION));
-  pageWrite(F("</b></p>"
+  if (gPendingUpdateTag.length() && gPendingUpdateUrl.length()) {
+    pageWrite(F("</b> &nbsp;<span style='color:#c80'>&#8593; v"));
+    pageWrite(gPendingUpdateTag);
+    pageWrite(F(" available</span>"));
+  } else {
+    pageWrite(F("</b>"));
+  }
+  pageWrite(F("</p>"
               "<form method='POST' action='/fw' enctype='multipart/form-data' class='form-sec'>"
               "<div class='field'>"
                 "<input type='file' name='fw' accept='.bin' required>"
@@ -1088,15 +1224,98 @@ static void handleFwGet() {
               "</div>"
               "</form>"
               ));
+
+  // ── Inline check result ────────────────────────────────────────────────────
+  if (gCheckResult == 1) {
+    pageWrite(F("<p style='color:green;margin:8px 0'>&#10003; Firmware is up to date.</p>"));
+    gCheckResult = 0;
+  } else if (gCheckResult == 2) {
+    pageWrite(F("<p style='color:red;margin:8px 0'>&#10007; Check failed: "));
+    pageWrite(gCheckError);
+    pageWrite(F("</p>"));
+    gCheckResult = 0;
+  }
+
+  // ── Download / Install buttons when a newer version was found ─────────────
   if (gPendingUpdateTag.length() && gPendingUpdateUrl.length()) {
-    pageWrite(F("<div class='card' style='margin-top:10px'>"
-                "<div class='title'>Pending update available</div><p>Release: <b>"));
+    pageWrite(F("<div class='row' style='margin-top:10px;gap:8px'>"));
+    pageWrite(F("<a class='btn' target='_blank' rel='noopener' href='"));
+    pageWrite(gPendingUpdateUrl);
+    pageWrite(F("'>&#8595; Download v"));
     pageWrite(gPendingUpdateTag);
-    pageWrite(F("</b></p>"
-                "<form method='POST' action='/fw/update'>"
-                  "<button type='submit' class='btn'>Install Pending Update</button>"
-                "</form>"
-                "</div>"));
+    pageWrite(F("</a>"));
+#if !defined(ESP8266)
+    pageWrite(F("<button class='btn' onclick='doUpd()'>&#8679; Install Update</button>"));
+#endif
+    pageWrite(F("</div>"));
+#if !defined(ESP8266)
+    // ESP32 SSE progress + JS — only injected when an update is pending.
+    pageWrite(F("<div id='prg' style='display:none;margin-top:10px'>"
+                "<table style='border-collapse:collapse;width:100%;margin-top:8px'>"
+                "<tr><td id='p1' style='padding:4px 0'>[ ] Connecting to download server</td></tr>"
+                "<tr><td id='p2' style='padding:4px 0;color:#aaa'>[ ] Downloading firmware</td></tr>"
+                "<tr><td id='p3' style='padding:4px 0;color:#aaa'>[ ] Flashing &amp; verifying</td></tr>"
+                "</table>"
+                "<div id='pres' style='margin-top:10px'></div>"
+                "</div>"
+                "<script>"
+                "var lastPhase='';"
+                "function doUpd(){"
+                  "document.querySelector('button[onclick]').disabled=true;"
+                  "document.getElementById('prg').style.display='block';"
+                  "document.getElementById('p1').textContent='>>> Connecting to download server...';"
+                  "fetch('/fw/update',{method:'POST'})"
+                  ".then(function(r){"
+                    "var rd=r.body.getReader(),dc=new TextDecoder(),buf='';"
+                    "function pump(){"
+                      "rd.read().then(function(x){"
+                        "if(x.done){"
+                          "if(lastPhase==='downloading'){"
+                            "document.getElementById('p2').textContent='[..] Downloading & flashing (please wait)...';"
+                            "document.getElementById('pres').innerHTML='<p>Device is writing firmware. Will reboot automatically.<br><b>This page will redirect in 90 seconds.</b></p>';"
+                            "setTimeout(function(){location.href='/fw';},90000);"
+                          "}"
+                          "return;"
+                        "}"
+                        "buf+=dc.decode(x.value,{stream:true});"
+                        "var parts=buf.split('\\n\\n');"
+                        "buf=parts.pop();"
+                        "parts.forEach(function(p){"
+                          "if(p.slice(0,6)==='data: '){"
+                            "try{onEvt(JSON.parse(p.slice(6)));}catch(e){}"
+                          "}"
+                        "});"
+                        "pump();"
+                      "});"
+                    "}"
+                    "pump();"
+                  "})"
+                  ".catch(function(e){"
+                    "document.getElementById('pres').innerHTML='<span style=color:red>Connection error: '+e+'</span>';"
+                  "});"
+                "}"
+                "function onEvt(d){"
+                  "var p=d.phase;lastPhase=p;"
+                  "if(p==='resolving'){"
+                    "document.getElementById('p1').textContent='>>> Connecting...';"
+                  "}else if(p==='downloading'){"
+                    "document.getElementById('p1').textContent='[OK] Connected';"
+                    "document.getElementById('p1').style.color='green';"
+                    "document.getElementById('p2').textContent='>>> Downloading firmware...';"
+                    "document.getElementById('p2').style.color='';"
+                  "}else if(p==='success'){"
+                    "document.getElementById('p2').textContent='[OK] Downloaded';"
+                    "document.getElementById('p2').style.color='green';"
+                    "document.getElementById('p3').textContent='[OK] Flash complete!';"
+                    "document.getElementById('p3').style.color='green';"
+                    "document.getElementById('pres').innerHTML='<b>Update successful!</b> Rebooting&hellip; Redirecting in 15s.';"
+                    "setTimeout(function(){location.href='/';},15000);"
+                  "}else if(p==='failed'){"
+                    "document.getElementById('pres').innerHTML='<span style=color:red><b>Failed:</b> '+d.error+'</span>';"
+                  "}"
+                "}"
+                "</script>"));
+#endif
   }
   pageWrite(F(
               "<div class='row' style='margin-top:10px'>"
@@ -1111,146 +1330,31 @@ static void handleFwGet() {
 static void handleFwCheckUpdate() {
   String latestTag, binUrl, err;
   int    binSize = 0;
-  if (!fetchLatestReleaseInfo(latestTag, binUrl, binSize, err)) {
-    const char* otaReleaseUrl = "https://github.com/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest";
-    pageBegin("Firmware Update");
-    pageWrite(F("<div class='card'><div class='title'>Update Check Failed</div><p>"));
-    pageWrite(err);
-    pageWrite(F("</p><p style='opacity:.8'>You can still update manually by uploading a .bin file from the latest release page.</p>"
-                "<div class='row' style='margin-top:10px'>"
-                "<a class='btn' target='_blank' rel='noopener' href='"));
-    pageWrite(String(otaReleaseUrl));
-    pageWrite(F("'>Open GitHub Release</a>"
-                "</div>"
-                "<div class='row' style='margin-top:10px'>"
-                "<a class='btn' href='/fw'>Back</a>"
-                "</div></div>"));
-    pageEnd();
-    return;
-  }
 
-  String current = normalizeVersion(String(HA_SW_VERSION));
-  String latest = normalizeVersion(latestTag);
-  if (compareVersion(latest, current) <= 0) {
+  if (!fetchLatestReleaseInfo(latestTag, binUrl, binSize, err)) {
+    gCheckResult       = 2;
+    gCheckError        = err;
     gPendingUpdateTag  = "";
     gPendingUpdateUrl  = "";
     gPendingUpdateSize = 0;
-    pageBegin("Firmware Update");
-    pageWrite(F("<div class='card'><div class='title'>No New Release</div><p>Current firmware is up to date.</p><p>Current: "));
-    pageWrite(current);
-    pageWrite(F("<br>Latest: "));
-    pageWrite(latest);
-    pageWrite(F("</p><a class='btn' href='/fw'>Back</a></div>"));
-    pageEnd();
-    return;
+  } else {
+    String current = normalizeVersion(String(HA_SW_VERSION));
+    String latest  = normalizeVersion(latestTag);
+    if (compareVersion(latest, current) <= 0) {
+      gCheckResult       = 1;   // up to date
+      gPendingUpdateTag  = "";
+      gPendingUpdateUrl  = "";
+      gPendingUpdateSize = 0;
+    } else {
+      gCheckResult       = 0;   // update found — shown via gPendingUpdateTag
+      gPendingUpdateTag  = latest;
+      gPendingUpdateUrl  = binUrl;
+      gPendingUpdateSize = binSize;
+    }
   }
 
-  gPendingUpdateTag  = latest;
-  gPendingUpdateUrl  = binUrl;
-  gPendingUpdateSize = binSize;
-
-  pageBegin("Firmware Update");
-  pageWrite(F("<div class='card'><div class='title'>New Release Available</div><p>Current: "));
-  pageWrite(current);
-  pageWrite(F("<br>Latest: "));
-  pageWrite(latest);
-  pageWrite(F("</p>"));
-
-#if defined(ESP8266)
-  // Remote HTTPS OTA is not viable on ESP8266: the BearSSL TLS stack (~10 KB),
-  // the Update sector buffer (4 KB), and the LwIP TCP receive window all compete
-  // for the same ~25 KB of DRAM.  Flash sector writes freeze the CPU for ~50 ms
-  // (SPI bus exclusive), during which LwIP cannot buffer incoming data — the CDN
-  // closes its send window, the connection stalls, and the device crashes or
-  // times out.  Tasmota avoids this entirely by using plain HTTP (no TLS).
-  // Solution: download the binary on a PC and upload it via the form below.
-  pageWrite(F("<p style='color:#c80;margin:8px 0'>"
-              "&#9888; Remote installation is not available on ESP8266 &mdash; "
-              "the device does not have enough RAM to sustain an HTTPS download "
-              "while writing to flash. Upload the file manually instead.</p>"
-              "<div class='row' style='margin-top:12px'>"));
-  pageWrite(F("<a class='btn' target='_blank' rel='noopener' href='"));
-  pageWrite(binUrl);   // permanent GitHub browser_download_url (no expiry)
-  pageWrite(F("'>&#8595; Download .bin</a>"
-              "<a class='btn' href='/fw' style='margin-left:8px'>Upload Firmware File</a>"
-              "</div>"));
-#else
-  // ESP32 has ample RAM — remote OTA via HTTPS works reliably.
-  pageWrite(F("<p>Update is ready to install.</p>"
-              "<div id='upg'>"
-              "<button class='btn' onclick='doUpd()'>Install Update</button>"
-              "<a class='btn' href='/fw' style='margin-left:8px'>Back</a>"
-              "</div>"
-              "<div id='prg' style='display:none'>"
-              "<table style='border-collapse:collapse;width:100%;margin-top:8px'>"
-              "<tr><td id='p1' style='padding:4px 0'>[ ] Connecting to download server</td></tr>"
-              "<tr><td id='p2' style='padding:4px 0;color:#aaa'>[ ] Downloading firmware</td></tr>"
-              "<tr><td id='p3' style='padding:4px 0;color:#aaa'>[ ] Flashing &amp; verifying</td></tr>"
-              "</table>"
-              "<div id='pres' style='margin-top:10px'></div>"
-              "</div>"
-              "<script>"
-              "var lastPhase='';"
-              "function doUpd(){"
-                "document.getElementById('upg').style.display='none';"
-                "document.getElementById('prg').style.display='block';"
-                "document.getElementById('p1').textContent='>>> Connecting to download server...';"
-                "fetch('/fw/update',{method:'POST'})"
-                ".then(function(r){"
-                  "var rd=r.body.getReader(),dc=new TextDecoder(),buf='';"
-                  "function pump(){"
-                    "rd.read().then(function(x){"
-                      "if(x.done){"
-                        "if(lastPhase==='downloading'){"
-                          "document.getElementById('p2').textContent='[..] Downloading & flashing (please wait)...';"
-                          "document.getElementById('pres').innerHTML='<p>Device is writing firmware. Will reboot automatically.<br><b>This page will redirect to Firmware page in 90 seconds.</b></p>';"
-                          "setTimeout(function(){location.href='/fw';},90000);"
-                        "}"
-                        "return;"
-                      "}"
-                      "buf+=dc.decode(x.value,{stream:true});"
-                      "var parts=buf.split('\\n\\n');"
-                      "buf=parts.pop();"
-                      "parts.forEach(function(p){"
-                        "if(p.slice(0,6)==='data: '){"
-                          "try{onEvt(JSON.parse(p.slice(6)));}catch(e){}"
-                        "}"
-                      "});"
-                      "pump();"
-                    "});"
-                  "}"
-                  "pump();"
-                "})"
-                ".catch(function(e){"
-                  "document.getElementById('pres').innerHTML='<span style=color:red>Connection error: '+e+'</span>';"
-                "});"
-              "}"
-              "function onEvt(d){"
-                "var p=d.phase;lastPhase=p;"
-                "if(p==='resolving'){"
-                  "document.getElementById('p1').textContent='>>> Connecting to download server...';"
-                  "document.getElementById('p1').style.color='';"
-                "}else if(p==='downloading'){"
-                  "document.getElementById('p1').textContent='[OK] Connected';"
-                  "document.getElementById('p1').style.color='green';"
-                  "document.getElementById('p2').textContent='>>> Downloading firmware...';"
-                  "document.getElementById('p2').style.color='';"
-                "}else if(p==='success'){"
-                  "document.getElementById('p2').textContent='[OK] Downloaded';"
-                  "document.getElementById('p2').style.color='green';"
-                  "document.getElementById('p3').textContent='[OK] Flash complete!';"
-                  "document.getElementById('p3').style.color='green';"
-                  "document.getElementById('pres').innerHTML='<b>Update successful!</b> Device is rebooting&hellip; Redirecting in 15s.';"
-                  "setTimeout(function(){location.href='/';},15000);"
-                "}else if(p==='failed'){"
-                  "document.getElementById('pres').innerHTML='<span style=color:red><b>Failed:</b> '+d.error+'</span>&nbsp;<a class=btn href=/fw>Back</a>';"
-                "}"
-              "}"
-              "</script>"));
-#endif
-
-  pageWrite(F("</div>"));
-  pageEnd();
+  server.sendHeader("Location", "/fw");
+  server.send(303, "text/plain", "");
 }
 
 static void handleFwDoUpdate() {
@@ -1652,13 +1756,10 @@ void handleApPortalConfigPost() {
 
 // -------------- Routes --------------
 void registerWebRoutes() {
-  
-  dynet.begin();
 
-  // Persisted entity types (load once server is up)
-  //tryLoadEntitiesFromFS();
-  loadConfig();
-  loadEntities();
+  dynet.begin();
+  // Note: loadConfig() + loadEntities() already called in setup() before registerWebRoutes().
+  // Do NOT call them again here — it would double-allocate EntityManager arrays.
   registerFwRoutes();
   
   // Root/AP portal
@@ -1678,12 +1779,13 @@ void registerWebRoutes() {
     uint8_t ch   = (uint8_t)server.arg("ch").toInt();
     String  cmd  = server.arg("cmd");
 
-    if      (cmd == "ON")  dynet.sendFadeToLevel_1s(area, ch, 100, 0x02);
-    else if (cmd == "OFF") dynet.sendFadeToLevel_1s(area, ch,   0, 0x02);
+    if      (cmd == "ON")  { dynet.sendFadeToLevel_1s(area, ch, 100, 0x02); dynet.scheduleLevelReq(area, ch, 400); }
+    else if (cmd == "OFF") { dynet.sendFadeToLevel_1s(area, ch,   0, 0x02); dynet.scheduleLevelReq(area, ch, 400); }
     else if (cmd == "REQ") dynet.sendRequestChannelLevel(area, ch);
     else if (cmd.startsWith("SET=")) {
-      int pct = constrain(cmd.substring(4).toInt(), 0, 100);
+      uint8_t pct = (uint8_t)cmd.substring(4).toInt();
       dynet.sendFadeToLevel_1s(area, ch, pct, 0x02);
+      dynet.scheduleLevelReq(area, ch, 400);
     } else { server.send(400, "application/json", "{\"ok\":false}"); return; }
 
     server.send(200, "application/json", "{\"ok\":true}");
@@ -1705,6 +1807,8 @@ void registerWebRoutes() {
 
     // Fire it (your send fn already accepts 1‑based preset)
     dynet.sendAreaPreset(area, preset, fade);
+    // Schedule level refresh after the preset fade completes
+    dynet.scheduleAreaLevelReqs(area, (uint32_t)fade + 500);
 
     server.sendHeader("Cache-Control","no-store");
     server.send(200, "application/json", "{\"ok\":true}");
@@ -1733,11 +1837,84 @@ server.on("/areas_status", HTTP_GET, [](){
 
   // One-shot poll: force a single dynetPollAreas() sweep
   server.on("/api/poll_all", HTTP_POST, [](){
-    areasSweepActive = true;
-    areasSweepArea   = 2;                 // always restart from Area 1
-    areasSweepNextAt = millis() + 50;     // first tick shortly
-    LOGF("[DyNet] sweep START requested from WebUI\n");
+    areasSweepActive  = true;
+    areasSweepArea    = 2;          // start from Area 2
+    areasSweepChannel = 0;
+    areasSweepPass    = 2;          // 3 total passes (2 extra after first)
+    areasSweepNextAt  = millis() + 50;
+    LOGF("[DyNet] sweep START (3 passes) requested from WebUI\n");
     server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Manual add / delete channel
+  // Set channel / area name
+  server.on("/api/set_name", HTTP_POST, [](){
+    using namespace DynetEntities;
+    String type = server.arg("type");
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    String  name = server.arg("name");
+    name.trim();
+    if (name.length() == 0) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"name cannot be empty\"}"); return; }
+    if (name.length() > 24) name = name.substring(0, 24);
+    if (type == "ch") {
+      uint8_t ch0 = (uint8_t)server.arg("ch").toInt();
+      em.setChannelName(area, ch0, name.c_str());
+    } else if (type == "area") {
+      em.setAreaName(area, name.c_str());
+    } else {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid type\"}"); return;
+    }
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/add_channel", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area") || !server.hasArg("ch")) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing area/ch\"}"); return;
+    }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    uint8_t ch0  = (uint8_t)server.arg("ch").toInt();
+    if (area < 1 || ch0 > 254) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid area/ch\"}"); return;
+    }
+    int idx = em.touchChannel(area, ch0);
+    if (idx < 0) { server.send(200, "application/json", "{\"ok\":false,\"error\":\"capacity full\"}"); return; }
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/del_channel", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area") || !server.hasArg("ch")) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing area/ch\"}"); return;
+    }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    uint8_t ch0  = (uint8_t)server.arg("ch").toInt();
+    bool ok = em.deleteChannel(area, ch0);
+    server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"not found\"}");
+  });
+
+  server.on("/api/add_area", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing area\"}"); return;
+    }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    if (area < 1) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid area\"}"); return;
+    }
+    int idx = em.touchArea(area);
+    if (idx < 0) { server.send(200, "application/json", "{\"ok\":false,\"error\":\"capacity full\"}"); return; }
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/del_area", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing area\"}"); return;
+    }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    bool ok = em.deleteArea(area);
+    server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"not found\"}");
   });
 
   // Area requests

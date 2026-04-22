@@ -42,8 +42,6 @@ public:
   void sendFadeToPreset_linear(uint8_t area, uint8_t preset0, uint8_t fade20ms);
   void sendSelectPreset_linear(uint8_t area, uint8_t preset0, uint16_t fade20ms16); // 2.0s   
 
-  void requestSync(uint8_t area, uint32_t durationMs = 15000);
-
   // Non-blocking deferred level-request queue — processed one-per-call in pollAreas()
   void scheduleLevelReq(uint8_t area, uint8_t ch0, uint32_t afterMs);
   void scheduleAreaLevelReqs(uint8_t area, uint32_t baseAfterMs = 400);
@@ -55,10 +53,6 @@ private:
   // RX state
   uint8_t _rxBuf[8] = {0};
   uint8_t _rxPos    = 0;
-  uint32_t _syncUntilMs = 0;
-  uint8_t  _syncAreaHint = 0;   // 0 = round robin
-  uint8_t  _rrArea = 2;
-  uint32_t _nextPresetPollAt = 0;
 
   // Deferred level-request queue
   struct LvlReq { uint8_t area; uint8_t ch0; uint32_t sendAt; };

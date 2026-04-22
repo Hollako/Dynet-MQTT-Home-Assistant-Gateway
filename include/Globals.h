@@ -112,6 +112,7 @@ struct AppConfig {
   int  uart_no;                // ESP32: 0/1/2 ; ESP8266 ignore
   uint8_t dynet_max_channels;  // 1..DYNET_MAX_CHANNELS
   uint8_t dynet_max_areas;     // 1..DYNET_MAX_AREAS
+  uint8_t ha_preset_count;     // 1..128, presets exposed to HA (default 4)
 };
 extern AppConfig cfg;
 extern int txPin;   // RS485 TX GPIO (or -1)

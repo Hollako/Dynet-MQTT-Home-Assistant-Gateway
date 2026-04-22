@@ -41,6 +41,7 @@ bool loadConfig() {
   if (doc.containsKey("btn_invert"))   buttonActiveLow = (bool)doc["btn_invert"];
   if (doc.containsKey("dynet_max_channels")) cfg.dynet_max_channels = (uint8_t)doc["dynet_max_channels"];
   if (doc.containsKey("dynet_max_areas"))    cfg.dynet_max_areas    = (uint8_t)doc["dynet_max_areas"];
+  if (doc.containsKey("ha_preset_count"))    cfg.ha_preset_count    = (uint8_t)doc["ha_preset_count"];
   return true;
 }
 
@@ -68,6 +69,7 @@ bool saveConfig() {
   doc["btn_invert"]   = buttonActiveLow;
   doc["dynet_max_channels"] = cfg.dynet_max_channels;
   doc["dynet_max_areas"]    = cfg.dynet_max_areas;
+  doc["ha_preset_count"]    = cfg.ha_preset_count;
 
   File f = LittleFS.open(CONFIG_FILE, "w"); if (!f) return false;
   size_t n = serializeJson(doc, f); f.flush(); f.close();
@@ -80,8 +82,8 @@ bool loadEntities() {
   if (!LittleFS.exists(ENTITIES_FILE)) return false;
   File f = LittleFS.open(ENTITIES_FILE, "r"); if (!f) return false;
 
-  DynamicJsonDocument doc(6144);
-  DeserializationError err = deserializeJson(doc, f, DeserializationOption::NestingLimit(6));
+  DynamicJsonDocument doc(8192);   // bumped: curtains array adds ~200 bytes per curtain area
+  DeserializationError err = deserializeJson(doc, f, DeserializationOption::NestingLimit(8));
   f.close(); if (err) return false;
 
   em.begin();
@@ -98,9 +100,11 @@ bool loadEntities() {
       if (area > 0) {
         int i = em.touchChannel(area, ch0);
         if (i >= 0) {
-          em.setChannelType(area, ch0, (DynetEntities::EntityType)type);
+          auto& ch = em.channelAtMut(i);
+          ch.type = (DynetEntities::EntityType)type;
+          if (v.containsKey("slave") && (bool)v["slave"]) ch.isCurtainSlave = true;
+          if (v.containsKey("ctime")) ch.curtainTimeSec = (uint8_t)v["ctime"];
           if (v.containsKey("n") && v["n"].is<const char*>()) {
-            auto& ch = em.channelAtMut(i);
             strncpy(ch.name, (const char*)v["n"], sizeof(ch.name) - 1);
             ch.name[sizeof(ch.name) - 1] = '\0';
           }
@@ -129,6 +133,38 @@ bool loadEntities() {
             ar.name[sizeof(ar.name) - 1] = '\0';
           }
         }
+        // Area type + per-curtain entries
+        if (v.containsKey("at")) {
+          int ai2 = em.findArea(area);
+          if (ai2 >= 0) {
+            auto& ar = em.areaAtMut(ai2);
+            ar.areaType = (DynetEntities::AreaType)(uint8_t)v["at"];
+            // Allocate curtain array on demand
+            if (ar.areaType == DynetEntities::AREA_CURTAIN && !ar.curtains) {
+              ar.curtains = new (std::nothrow) DynetEntities::AreaCurtainEntry[DynetEntities::MAX_CURTAINS_PER_AREA];
+              if (ar.curtains) {
+                for (int ci = 0; ci < DynetEntities::MAX_CURTAINS_PER_AREA; ci++)
+                  ar.curtains[ci] = DynetEntities::AreaCurtainEntry{};
+              }
+            }
+            if (ar.curtains && v.containsKey("curtains") && v["curtains"].is<JsonArray>()) {
+              uint8_t ci = 0;
+              for (JsonObject ce : v["curtains"].as<JsonArray>()) {
+                if (ci >= DynetEntities::MAX_CURTAINS_PER_AREA) break;
+                ar.curtains[ci].used        = true;
+                ar.curtains[ci].openPreset  = ce["op"] | 1;
+                ar.curtains[ci].closePreset = ce["cl"] | 2;
+                ar.curtains[ci].stopPreset  = ce["st"] | 3;
+                if (ce.containsKey("n") && ce["n"].is<const char*>()) {
+                  strncpy(ar.curtains[ci].name, (const char*)ce["n"], sizeof(ar.curtains[ci].name) - 1);
+                  ar.curtains[ci].name[sizeof(ar.curtains[ci].name) - 1] = '\0';
+                }
+                ci++;
+                delay(0);
+              }
+            }
+          }
+        }
       }
       delay(0);
     }
@@ -142,7 +178,7 @@ bool saveEntities() {
   using namespace DynetEntities;
   File f = LittleFS.open(ENTITIES_FILE, "w"); if (!f) return false;
 
-  DynamicJsonDocument doc(6144);
+  DynamicJsonDocument doc(8192);
 
   // channels
   JsonArray chs = doc.createNestedArray("channels");
@@ -153,6 +189,8 @@ bool saveEntities() {
     o["a"] = c.area;
     o["c"] = c.channel0;
     o["t"] = (uint8_t)c.type;
+    if (c.isCurtainSlave)            o["slave"] = true;
+    if (c.type == DynetEntities::CURTAIN && !c.isCurtainSlave) o["ctime"] = c.curtainTimeSec;
     if (c.name[0]) o["n"] = c.name;
     // Not saving level/isOn to avoid heavy write cycles during fades.
   }
@@ -168,6 +206,19 @@ bool saveEntities() {
     if (a.hasTemp)  o["tempC"]  = a.tempC;
     if (a.hasSetpt) o["setptC"] = a.setptC;
     if (a.name[0])  o["n"]      = a.name;
+    if (a.areaType != DynetEntities::AREA_LIGHTS && a.curtains) {
+      o["at"] = (uint8_t)a.areaType;
+      JsonArray cArr = o.createNestedArray("curtains");
+      for (uint8_t ci = 0; ci < DynetEntities::MAX_CURTAINS_PER_AREA; ci++) {
+        const auto& ce = a.curtains[ci];
+        if (!ce.used) continue;
+        JsonObject co = cArr.createNestedObject();
+        if (ce.name[0]) co["n"] = ce.name;
+        co["op"] = ce.openPreset;
+        co["cl"] = ce.closePreset;
+        co["st"] = ce.stopPreset;
+      }
+    }
   }
 
   String out; serializeJson(doc, out);

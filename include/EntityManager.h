@@ -8,18 +8,48 @@ namespace DynetEntities {
 enum EntityType : uint8_t {
   LIGHT_DIMMABLE = 0,   // default HA Light (brightness)
   LIGHT_ONOFF    = 1,   // HA Light on/off only
-  SWITCH_ONOFF   = 2    // HA Switch on/off
+  SWITCH_ONOFF   = 2,   // HA Switch on/off
+  CURTAIN        = 3    // HA Cover — paired: ch0=UP relay, ch0+1=DOWN relay
+};
+
+enum CurtainMove : uint8_t {
+  CURTAIN_IDLE        = 0,
+  CURTAIN_DELAY_OPEN,   // 500 ms interlocking pause before engaging UP relay
+  CURTAIN_OPENING,      // UP relay ON, travel timer running
+  CURTAIN_DELAY_CLOSE,  // 500 ms interlocking pause before engaging DOWN relay
+  CURTAIN_CLOSING,      // DOWN relay ON, travel timer running
+};
+
+// Area-level type: Lights (default) or virtual Curtain via preset opcodes
+enum AreaType : uint8_t {
+  AREA_LIGHTS  = 0,   // normal — channels visible, preset/temp/setpoint entities in HA
+  AREA_CURTAIN = 1,   // virtual curtain — no channel management; sends presets for OPEN/CLOSE/STOP
 };
 
 struct ChannelState {
-  uint8_t  area      = 0;    // 1..255
-  uint8_t  channel0  = 0;    // 0-origin (as per DyNet)
-  EntityType type    = LIGHT_DIMMABLE;
-  bool     present   = false;
-  bool     isOn      = false;
-  uint8_t  levelPct  = 0;     // 0..100 derived from reports
-  char     name[25]  = {};    // user label; empty = default "Area N Ch M"
+  uint8_t    area            = 0;    // 1..255
+  uint8_t    channel0        = 0;    // 0-origin (as per DyNet)
+  EntityType type            = LIGHT_DIMMABLE;
+  bool       present         = false;
+  bool       isOn            = false;
+  uint8_t    levelPct        = 0;    // 0..100 derived from reports
+  char       name[41]        = {};   // user label; empty = default "Area N Ch M"
+  // Curtain support
+  bool       isCurtainSlave  = false;  // true = DOWN relay; hidden from UI & HA
+  uint8_t    curtainTimeSec  = 30;     // travel time in seconds (master only, persisted)
+  CurtainMove curtainMove    = CURTAIN_IDLE;   // state-machine state (runtime, not persisted)
+  uint32_t   curtainActionAt = 0;              // millis() of next transition  (runtime)
 };
+
+// One named curtain within an AREA_CURTAIN-type area
+struct AreaCurtainEntry {
+  bool    used        = false;
+  char    name[41]    = {};    // user label
+  uint8_t openPreset  = 1;    // 1-origin preset sent for OPEN
+  uint8_t closePreset = 2;
+  uint8_t stopPreset  = 3;
+};
+static constexpr uint8_t MAX_CURTAINS_PER_AREA = 32;
 
 struct AreaState {
   uint8_t  area     = 0;   // 1..255
@@ -30,7 +60,12 @@ struct AreaState {
   bool     hasSetpt = false;
   float    setptC   = NAN;
   uint32_t lastLevelReqMs = 0;   // debounce refresh requests
-  char     name[25] = {};   // user label; empty = default "Area N"
+  char     name[41] = {};   // user label; empty = default "Area N"
+  // Area-type / virtual curtains
+  AreaType         areaType = AREA_LIGHTS;
+  // Allocated on demand when areaType is set to AREA_CURTAIN (nullptr for light areas).
+  // Saves ~1440 bytes per area slot vs. embedding the array statically.
+  AreaCurtainEntry* curtains = nullptr; // heap-allocated [MAX_CURTAINS_PER_AREA] or nullptr
 };
 
 #ifndef DYNET_MAX_CHANNELS
@@ -70,6 +105,20 @@ public:
   // Name setters (persists via saveEntities + republishes HA discovery)
   void setChannelName(uint8_t area, uint8_t channel0, const char* name);
   void setAreaName(uint8_t area, const char* name);
+
+  // Channel curtain control (relay-based, paired channels)
+  void commandCurtain(uint8_t area, uint8_t ch0, const char* cmd); // "OPEN"/"CLOSE"/"STOP"
+  void setCurtainTime(uint8_t area, uint8_t ch0, uint8_t seconds); // set travel time
+  void pollCurtains();   // process state-machine; call every loop()
+
+  // Area curtain control (virtual — sends preset opcodes, no physical channels)
+  void setAreaType(uint8_t area, AreaType t);
+  int  addAreaCurtain(uint8_t area);                           // returns index 0..7 or -1 if full
+  void deleteAreaCurtain(uint8_t area, uint8_t idx);
+  void setAreaCurtainEntry(uint8_t area, uint8_t idx,
+                           const char* name,
+                           uint8_t openP, uint8_t closeP, uint8_t stopP);
+  void commandAreaCurtain(uint8_t area, uint8_t curtainIdx, const char* cmd); // "OPEN"/"CLOSE"/"STOP"
 
   // Access
   inline int channelsCount() const { return _chCount; }

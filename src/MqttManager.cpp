@@ -34,8 +34,17 @@ static void addHadeviceBlockForArea(JsonDocument& doc, uint8_t area) {
 
   dev["manufacturer"] = HA_MANUFACTURER;
   dev["model"]        = String(HA_MODEL) + " (Area)";
-  dev["name"]         = String("DyNet Area ") + area;
+  // Use the user-set area name if available, otherwise fall back to "Area N"
+  {
+    using namespace DynetEntities;
+    int ai = em.findArea(area);
+    dev["name"] = (ai >= 0 && em.areaAt(ai).name[0])
+                  ? String(em.areaAt(ai).name)
+                  : (String("Area ") + area);
+  }
   dev["sw_version"]   = HA_SW_VERSION;
+  dev["hw_version"]   = String("Dynalite Area ") + area;   // permanent area# reference
+  dev["via_device"]   = sid + "_gateway";   // links to the ESP gateway device
 
   IPAddress ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : WiFi.softAPIP();
   dev["configuration_url"] = String("http://") + ip.toString() + "/";
@@ -52,6 +61,24 @@ String areaBaseTopic(uint8_t area) {
 String channelBaseTopic(uint8_t area, uint8_t channel0) {
   String sid = mqttSafeId(deviceId);
   return String(BASE_TOPIC_PREFIX) + "/" + sid + "/area/" + String(area) + "/ch/" + String(channel0);
+}
+String gatewayBaseTopic() {
+  String sid = mqttSafeId(deviceId);
+  return String(BASE_TOPIC_PREFIX) + "/" + sid + "/gateway";
+}
+
+// HA device block for the gateway ESP itself (shared by all gateway entities)
+static void addHaDeviceBlock_Gateway(JsonDocument& doc) {
+  String sid = mqttSafeId(deviceId);
+  JsonObject dev = doc.createNestedObject("device");
+  JsonArray ids = dev.createNestedArray("identifiers");
+  ids.add(sid + "_gateway");
+  dev["name"]         = deviceId.length() ? deviceId : "DyNet Gateway";
+  dev["manufacturer"] = HA_MANUFACTURER;
+  dev["model"]        = HA_MODEL;
+  dev["sw_version"]   = HA_SW_VERSION;
+  IPAddress ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : WiFi.softAPIP();
+  dev["configuration_url"] = String("http://") + ip.toString() + "/";
 }
 
 void publishAvailability(const char* payload) {
@@ -164,7 +191,7 @@ static void publishHADiscovery_PresetSelect(uint8_t area) {
   String objId = String("a") + String(area) + "_preset";
   String discTopic = String(HA_DISCOVERY_PREFIX) + "/select/" + sid + "/" + objId + "/config";
 
-  DynamicJsonDocument doc(768);
+  DynamicJsonDocument doc(1536);  // 128 options × ~5 bytes + doc overhead
   doc["name"]               = areaDisplayName(area) + " Preset";
   doc["unique_id"]          = sid + "_" + objId;
   doc["command_topic"]      = areaBaseTopic(area) + "/preset/set";
@@ -172,18 +199,31 @@ static void publishHADiscovery_PresetSelect(uint8_t area) {
   doc["availability_topic"] = availabilityTopic();
 
   JsonArray opts = doc.createNestedArray("options");
-  for (int p = 1; p <= 16; ++p) opts.add(String(p));
+  uint8_t pCount = cfg.ha_preset_count ? cfg.ha_preset_count : 4;
+  if (pCount > 128) pCount = 128;
+  for (int p = 1; p <= pCount; ++p) opts.add(String(p));
 
   addHadeviceBlockForArea(doc, area);
   String payload; serializeJson(doc, payload);
   mqtt.publish(discTopic.c_str(), payload.c_str(), true);
 }
 
+static void publishHADiscovery_Cover(uint8_t area, uint8_t ch0); // forward declaration
+
 void publishHADiscoveryForChannel(int idx) {
-  
+
   using namespace DynetEntities;
   if (idx < 0 || idx >= em.channelsCount()) return;
   const ChannelState& chs = em.channelAt(idx);
+
+  // Slave channels have no independent HA entity
+  if (chs.isCurtainSlave) return;
+
+  // Curtain master → cover entity
+  if (chs.type == CURTAIN) {
+    publishHADiscovery_Cover(chs.area, chs.channel0);
+    return;
+  }
 
   // --- build topics/JSON for current type ---
   String sid   = mqttSafeId(deviceId);
@@ -224,8 +264,66 @@ void publishHADiscoveryForChannel(int idx) {
   retireOppositeDiscovery(chs.area, chs.channel0, chs.type);
 }
 
+// ---- HA Cover for a single named curtain entry inside an AREA_CURTAIN area ---
+void publishHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx) {
+  using namespace DynetEntities;
+  int ai = em.findArea(area);
+  if (ai < 0) return;
+  if (!em.areaAt(ai).curtains) return;
+  const AreaCurtainEntry& e = em.areaAt(ai).curtains[idx];
+  if (!e.used) return;
+
+  String sid    = mqttSafeId(deviceId);
+  String objId  = String("a") + area + "_ct" + idx;
+  String discTopic = String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/" + objId + "/config";
+  String cmdTopic  = areaBaseTopic(area) + "/curtain/" + idx + "/cover/set";
+
+  String entryName = (e.name[0]) ? String(e.name)
+                                  : (areaDisplayName(area) + " Curtain " + (idx + 1));
+
+  DynamicJsonDocument doc(640);
+  addHadeviceBlockForArea(doc, area);
+  doc["name"]               = entryName;
+  doc["unique_id"]          = sid + "_" + objId;
+  doc["command_topic"]      = cmdTopic;
+  doc["payload_open"]       = "OPEN";
+  doc["payload_close"]      = "CLOSE";
+  doc["payload_stop"]       = "STOP";
+  doc["optimistic"]         = true;
+  doc["device_class"]       = "curtain";
+  doc["availability_topic"] = availabilityTopic();
+
+  String payload; serializeJson(doc, payload);
+  mqtt.publish(discTopic.c_str(), payload.c_str(), true);
+  LOGF("[HA] area curtain entry published: A%u ct%u\n", area, idx);
+}
+
+void removeHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx) {
+  if (!mqtt.connected()) return;
+  String sid   = mqttSafeId(deviceId);
+  String objId = String("a") + area + "_ct" + idx;
+  String t     = String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/" + objId + "/config";
+  mqtt.publish(t.c_str(), "", true);
+  LOGF("[HA] removed area curtain entry A%u ct%u\n", area, idx);
+}
+
 void publishHADiscoveryForArea(uint8_t area) {
-  // Publish temp sensor + setpoint number + save preset button + preset select
+  using namespace DynetEntities;
+  int ai = em.findArea(area);
+
+  // Area Curtain type: publish one cover entity per curtain entry
+  if (ai >= 0 && em.areaAt(ai).areaType == AREA_CURTAIN) {
+    if (em.areaAt(ai).curtains) {
+      for (uint8_t i = 0; i < MAX_CURTAINS_PER_AREA; i++) {
+        if (em.areaAt(ai).curtains[i].used) {
+          publishHADiscoveryForAreaCurtainEntry(area, i);
+        }
+      }
+    }
+    return;
+  }
+
+  // Default Lights area: temp sensor + setpoint + save preset button + preset select
   publishHADiscovery_TempSensor(area);
   publishHADiscovery_SetpointNumber(area);
   // Save preset button
@@ -246,6 +344,39 @@ void publishHADiscoveryForArea(uint8_t area) {
   publishHADiscovery_PresetSelect(area);
 }
 
+// ---- HA Cover (curtain) discovery -----------------------------------
+static void publishHADiscovery_Cover(uint8_t area, uint8_t ch0) {
+  using namespace DynetEntities;
+  String sid    = mqttSafeId(deviceId);
+  String objId  = String("a") + String(area) + "_c" + String(ch0);
+  String discTopic = String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/" + objId + "/config";
+  String base   = channelBaseTopic(area, ch0);
+
+  // Get display name from channel
+  String name;
+  int ci = em.findChannel(area, ch0);
+  if (ci >= 0 && em.channelAt(ci).name[0])
+    name = String(em.channelAt(ci).name);
+  else
+    name = String("Area ") + area + " Ch " + (ch0 + 1);
+
+  DynamicJsonDocument doc(640);
+  addHadeviceBlockForArea(doc, area);
+  doc["name"]               = name;
+  doc["unique_id"]          = sid + "_" + objId;
+  doc["command_topic"]      = base + "/cover/set";
+  doc["payload_open"]       = "OPEN";
+  doc["payload_close"]      = "CLOSE";
+  doc["payload_stop"]       = "STOP";
+  doc["optimistic"]         = true;
+  doc["device_class"]       = "curtain";
+  doc["availability_topic"] = availabilityTopic();
+
+  String payload; serializeJson(doc, payload);
+  mqtt.publish(discTopic.c_str(), payload.c_str(), true);
+  LOGF("[HA] cover discovery published: A%u Ch%u\n", area, ch0);
+}
+
 // ---- HA Discovery removal ---------------------------------------
 // Publish empty retained payloads to the discovery topics to remove
 // entities from Home Assistant when a channel or area is manually deleted.
@@ -254,14 +385,11 @@ void removeHADiscoveryForChannel(uint8_t area, uint8_t ch0, DynetEntities::Entit
   if (!mqtt.connected()) return;
   String sid   = mqttSafeId(deviceId);
   String objId = String("a") + String(area) + "_c" + String(ch0);
-  // Remove whichever component type is currently registered
-  const char* comp = (type == DynetEntities::SWITCH_ONOFF) ? "switch" : "light";
-  String t = String(HA_DISCOVERY_PREFIX) + "/" + comp + "/" + sid + "/" + objId + "/config";
-  mqtt.publish(t.c_str(), "", true);
-  // Also clear the opposite in case type was ever changed
-  const char* opp = (type == DynetEntities::SWITCH_ONOFF) ? "light" : "switch";
-  String t2 = String(HA_DISCOVERY_PREFIX) + "/" + opp + "/" + sid + "/" + objId + "/config";
-  mqtt.publish(t2.c_str(), "", true);
+  // Always wipe all three possible component types so nothing is left stale
+  for (const char* comp : {"light", "switch", "cover"}) {
+    String t = String(HA_DISCOVERY_PREFIX) + "/" + comp + "/" + sid + "/" + objId + "/config";
+    mqtt.publish(t.c_str(), "", true);
+  }
   LOGF("[HA] removed discovery for A%u C%u\n", area, ch0);
 }
 
@@ -276,7 +404,140 @@ void removeHADiscoveryForArea(uint8_t area) {
   mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/button/"  + sid + "/a" + area + "_save_preset/config").c_str(), "", true);
   // select (preset)
   mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/select/"  + sid + "/a" + area + "_preset/config").c_str(),      "", true);
+  // cover entries (area curtain — wipe all per-curtain slots)
+  for (uint8_t i = 0; i < DynetEntities::MAX_CURTAINS_PER_AREA; i++) {
+    String objId = String("a") + area + "_ct" + i;
+    mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/" + objId + "/config").c_str(), "", true);
+  }
+  // also wipe the legacy area-level cover entity (a<N>_cover) so stale retained
+  // messages from older firmware versions are cleared from the broker
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/a" + area + "_cover/config").c_str(), "", true);
   LOGF("[HA] removed discovery for Area %u\n", area);
+}
+
+// ---- Gateway Device HA Discovery --------------------------------
+void publishHADiscovery_Gateway() {
+  if (!mqtt.connected()) return;
+  String sid  = mqttSafeId(deviceId);
+  String base = gatewayBaseTopic();
+  String avail = availabilityTopic();
+
+  // Helper: publish one entity config
+  auto pub = [&](const char* comp, const char* objSuffix, JsonDocument& doc) {
+    String topic = String(HA_DISCOVERY_PREFIX) + "/" + comp + "/" + sid + "/" + objSuffix + "/config";
+    String payload; serializeJson(doc, payload);
+    mqtt.publish(topic.c_str(), payload.c_str(), true);
+  };
+
+  // 1. IP address sensor
+  {
+    DynamicJsonDocument doc(512);
+    addHaDeviceBlock_Gateway(doc);
+    doc["name"]               = "Gateway IP";
+    doc["unique_id"]          = sid + "_gw_ip";
+    doc["state_topic"]        = base + "/state";
+    doc["value_template"]     = "{{ value_json.ip }}";
+    doc["icon"]               = "mdi:ip-network";
+    doc["entity_category"]    = "diagnostic";
+    doc["availability_topic"] = avail;
+    pub("sensor", "gw_ip", doc);
+  }
+  // 2. RSSI sensor
+  {
+    DynamicJsonDocument doc(512);
+    addHaDeviceBlock_Gateway(doc);
+    doc["name"]               = "Gateway RSSI";
+    doc["unique_id"]          = sid + "_gw_rssi";
+    doc["state_topic"]        = base + "/state";
+    doc["value_template"]     = "{{ value_json.rssi }}";
+    doc["unit_of_measurement"] = "dBm";
+    doc["device_class"]       = "signal_strength";
+    doc["entity_category"]    = "diagnostic";
+    doc["availability_topic"] = avail;
+    pub("sensor", "gw_rssi", doc);
+  }
+  // 3. Free heap sensor
+  {
+    DynamicJsonDocument doc(512);
+    addHaDeviceBlock_Gateway(doc);
+    doc["name"]               = "Gateway Free Heap";
+    doc["unique_id"]          = sid + "_gw_heap";
+    doc["state_topic"]        = base + "/state";
+    doc["value_template"]     = "{{ value_json.heap }}";
+    doc["unit_of_measurement"] = "B";
+    doc["icon"]               = "mdi:memory";
+    doc["entity_category"]    = "diagnostic";
+    doc["availability_topic"] = avail;
+    pub("sensor", "gw_heap", doc);
+  }
+  // 4. Uptime sensor
+  {
+    DynamicJsonDocument doc(512);
+    addHaDeviceBlock_Gateway(doc);
+    doc["name"]               = "Gateway Uptime";
+    doc["unique_id"]          = sid + "_gw_uptime";
+    doc["state_topic"]        = base + "/state";
+    doc["value_template"]     = "{{ value_json.uptime }}";
+    doc["unit_of_measurement"] = "s";
+    doc["icon"]               = "mdi:clock-outline";
+    doc["entity_category"]    = "diagnostic";
+    doc["availability_topic"] = avail;
+    pub("sensor", "gw_uptime", doc);
+  }
+  // 5. Reboot button
+  {
+    DynamicJsonDocument doc(512);
+    addHaDeviceBlock_Gateway(doc);
+    doc["name"]               = "Gateway Reboot";
+    doc["unique_id"]          = sid + "_gw_reboot";
+    doc["command_topic"]      = base + "/reboot";
+    doc["payload_press"]      = "PRESS";
+    doc["icon"]               = "mdi:restart";
+    doc["entity_category"]    = "config";
+    doc["availability_topic"] = avail;
+    pub("button", "gw_reboot", doc);
+  }
+  // 6. Scan Areas button
+  {
+    DynamicJsonDocument doc(512);
+    addHaDeviceBlock_Gateway(doc);
+    doc["name"]               = "Gateway Scan Areas";
+    doc["unique_id"]          = sid + "_gw_scan";
+    doc["command_topic"]      = base + "/scan";
+    doc["payload_press"]      = "PRESS";
+    doc["icon"]               = "mdi:magnify-scan";
+    doc["entity_category"]    = "config";
+    doc["availability_topic"] = avail;
+    pub("button", "gw_scan", doc);
+  }
+  // 7. Re-publish HA Discovery button
+  {
+    DynamicJsonDocument doc(512);
+    addHaDeviceBlock_Gateway(doc);
+    doc["name"]               = "Gateway Re-publish Discovery";
+    doc["unique_id"]          = sid + "_gw_rediscover";
+    doc["command_topic"]      = base + "/rediscover";
+    doc["payload_press"]      = "PRESS";
+    doc["icon"]               = "mdi:home-search";
+    doc["entity_category"]    = "config";
+    doc["availability_topic"] = avail;
+    pub("button", "gw_rediscover", doc);
+  }
+
+  LOGF("[HA] gateway device discovery published\n");
+}
+
+// Publish live diagnostic state for the gateway device (called periodically)
+void publishGatewayState() {
+  if (!mqtt.connected()) return;
+  DynamicJsonDocument doc(256);
+  IPAddress ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : WiFi.softAPIP();
+  doc["ip"]     = ip.toString();
+  doc["rssi"]   = (WiFi.status() == WL_CONNECTED) ? (int)WiFi.RSSI() : 0;
+  doc["heap"]   = (uint32_t)ESP.getFreeHeap();
+  doc["uptime"] = (uint32_t)(millis() / 1000UL);
+  String payload; serializeJson(doc, payload);
+  mqtt.publish((gatewayBaseTopic() + "/state").c_str(), payload.c_str(), false);
 }
 
 // ---- State Publishers -------------------------------------------
@@ -349,20 +610,38 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (!startsWith(top, base)) return;
 
   // Patterns:
-  // dynet/<sid>/area/<A>/ch/<C>/set
-  // dynet/<sid>/area/<A>/ch/<C>/brightness/set
-  // dynet/<sid>/area/<A>/ch/<C>/level/set
-  // dynet/<sid>/area/<A>/ch/<C>/request
-  // dynet/<sid>/area/<A>/save_preset
-  // dynet/<sid>/area/<A>/preset/set
-  // dynet/<sid>/area/<A>/reqpreset
-  // dynet/<sid>/area/<A>/reqlevels
-  // dynet/<sid>/area/<A>/setpoint/set
+  // dynet/<sid>/gateway/reboot|scan|rediscover
+  // dynet/<sid>/area/<A>/ch/<C>/set  ...etc
 
-  String rest = top.substring(base.length()); // e.g., "area/1/ch/2/set"
+  String rest = top.substring(base.length()); // e.g., "area/1/ch/2/set" or "gateway/reboot"
   int p0 = rest.indexOf('/');
   if (p0 < 0) return;
   String pA = rest.substring(0, p0);
+
+  // --- Gateway device commands ---
+  if (pA == "gateway") {
+    String gwCmd = rest.substring(p0 + 1);
+    if (gwCmd == "reboot") {
+      LOGF("[MQTT] gateway reboot requested\n");
+      publishAvailability(HA_OFFLINE);
+      delay(200);
+      ESP.restart();
+    } else if (gwCmd == "scan") {
+      LOGF("[MQTT] gateway scan requested\n");
+      areasSweepActive  = true;
+      areasSweepArea    = 2;
+      areasSweepChannel = 0;
+      areasSweepPass    = 2;
+      areasSweepNextAt  = millis() + 50;
+    } else if (gwCmd == "rediscover") {
+      LOGF("[MQTT] gateway rediscover requested\n");
+      rediscoveryScheduled = true;
+      rediscoveryPtr       = 0;
+      nextRediscoveryAt    = millis() + 200;
+    }
+    return;
+  }
+
   if (pA != "area") return;
 
   String rest2 = rest.substring(p0 + 1);       // "1/ch/2/set" or "1/save_preset"
@@ -408,6 +687,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       using namespace DynetEntities;
       em.noteReportPreset((uint8_t)area, (uint8_t)(preset - 1));
       publishPresetForArea((uint8_t)area);
+    }
+    return;
+  }
+
+  // Area curtain cover command: area/<N>/curtain/<idx>/cover/set
+  if (afterArea.startsWith("curtain/")) {
+    String curtainRest = afterArea.substring(8);  // "<idx>/cover/set"
+    int p = curtainRest.indexOf('/');
+    if (p >= 0 && curtainRest.substring(p + 1) == "cover/set") {
+      uint8_t curtainIdx = (uint8_t)curtainRest.substring(0, p).toInt();
+      using namespace DynetEntities;
+      em.commandAreaCurtain((uint8_t)area, curtainIdx, msg.c_str());
     }
     return;
   }
@@ -578,6 +869,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  // 5) curtain cover command: OPEN / CLOSE / STOP
+  if (action == "cover/set") {
+    using namespace DynetEntities;
+    em.commandCurtain((uint8_t)area, (uint8_t)ch, msg.c_str());
+    return;
+  }
+
   // (future: toggle/step_up/step_down)
 }
 
@@ -596,6 +894,9 @@ static void subscribeAll() {
   mqtt.subscribe((base + "area/+/reqpreset").c_str());
   mqtt.subscribe((base + "area/+/reqlevels").c_str());
   mqtt.subscribe((base + "area/+/setpoint/set").c_str());
+  mqtt.subscribe((base + "area/+/curtain/+/cover/set").c_str());
+  mqtt.subscribe((base + "area/+/ch/+/cover/set").c_str());
+  mqtt.subscribe((base + "gateway/+").c_str());
 }
 
 void mqttEnsureConnected() {
@@ -619,7 +920,12 @@ void mqttEnsureConnected() {
   if (ok) {
     publishAvailability(HA_ONLINE);
     subscribeAll();
-    // trigger a paced HA discovery sweep
+    // Publish gateway device discovery + initial state
+    if (cfg.ha_discovery) {
+      publishHADiscovery_Gateway();
+      publishGatewayState();
+    }
+    // trigger a paced HA discovery sweep for areas/channels
     if (cfg.ha_discovery) {
       rediscoveryScheduled = true;
       rediscoveryPtr = 0;                       // channel index
@@ -632,6 +938,8 @@ void mqttEnsureConnected() {
 
 void mqttSetup() { /* nothing extra */ }
 
+static uint32_t lastGwStateMs = 0;
+
 void mqttLoop() {
   if (String(cfg.mqtt_server).length() > 0) {
     if (!mqtt.connected()) {
@@ -641,6 +949,12 @@ void mqttLoop() {
       }
     } else {
       mqtt.loop();
+
+      // Gateway state update every 30 s
+      if (millis() - lastGwStateMs >= 30000UL) {
+        lastGwStateMs = millis();
+        publishGatewayState();
+      }
 
       // paced HA discovery over channels + areas
       if (cfg.ha_discovery && rediscoveryScheduled) {
@@ -662,6 +976,8 @@ void mqttLoop() {
             for (int i = 0; i < em.areasCount(); i++) {
               publishHADiscoveryForArea(em.areaAt(i).area);
             }
+            publishHADiscovery_Gateway();  // gateway device
+            publishGatewayState();
             rediscoveryPtr++;           // move past the "areas" gate
             nextRediscoveryAt = millis() + 200;
           } else {

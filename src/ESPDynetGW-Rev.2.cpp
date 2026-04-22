@@ -104,6 +104,9 @@ void loop() {
   // Periodic area/channel poll after preset changes
   dynetPollAreas();
 
+  // Curtain state-machine: interlocking delays + travel-time auto-stop
+  DynetEntities::em.pollCurtains();
+
   // Handle scheduled reboot (used by Save & Reboot, restore, etc.)
   serviceScheduledReboot();
 

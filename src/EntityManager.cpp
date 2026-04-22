@@ -13,6 +13,7 @@ extern void publishHADiscoveryForChannel(int idx);
 extern void publishHADiscoveryForArea(uint8_t area);
 extern void publishStateForChannel(int idx);
 extern void publishSensorsForArea(uint8_t area);
+extern void removeHADiscoveryForChannel(uint8_t area, uint8_t ch0, DynetEntities::EntityType type);
 
 static float q025_toC(int16_t steps) { return (float)steps * 0.25f; }
 static float fp_toC(uint8_t hi, uint8_t lo) {
@@ -24,15 +25,21 @@ static float fp_toC(uint8_t hi, uint8_t lo) {
 
 void EntityManager::begin() {
   if (_channels) { delete[] _channels; _channels = nullptr; }
-  if (_areas)    { delete[] _areas;    _areas    = nullptr; }
+  if (_areas) {
+    // Free per-area curtain arrays before releasing the area slab
+    for (int i = 0; i < _arCap; i++) {
+      if (_areas[i].curtains) { delete[] _areas[i].curtains; _areas[i].curtains = nullptr; }
+    }
+    delete[] _areas; _areas = nullptr;
+  }
 
   int chCap = cfg.dynet_max_channels ? constrain((int)cfg.dynet_max_channels, 1, (int)DYNET_MAX_CHANNELS) : DYNET_MAX_CHANNELS;
   int arCap = cfg.dynet_max_areas    ? constrain((int)cfg.dynet_max_areas,    1, (int)DYNET_MAX_AREAS)    : DYNET_MAX_AREAS;
 
   _channels = new (std::nothrow) ChannelState[chCap];
-  if (_channels) memset(_channels, 0, sizeof(ChannelState) * chCap);
+  if (_channels) { for (int i = 0; i < chCap; i++) _channels[i] = ChannelState{}; }
   _areas    = new (std::nothrow) AreaState   [arCap];
-  if (_areas)    memset(_areas,    0, sizeof(AreaState)    * arCap);
+  if (_areas)    { for (int i = 0; i < arCap; i++) _areas[i]    = AreaState{};    }
   _chCount = 0; _arCount = 0;
   _chCap   = chCap; _arCap = arCap;       // NEW: remember capacities
 }
@@ -86,11 +93,54 @@ int EntityManager::touchChannel(uint8_t area, uint8_t channel0) {
 
 void EntityManager::setChannelType(uint8_t area, uint8_t channel0, EntityType t) {
   int i = touchChannel(area, channel0);
-  if (i >= 0) {
-    _channels[i].type = t;
-    publishHADiscoveryForChannel(i);  // <-- must be here
-    saveEntities();                   // persist the choice
+  if (i < 0) return;
+
+  EntityType oldType = _channels[i].type;
+
+  // ── Leaving CURTAIN → free the slave channel ────────────────────────────
+  if (oldType == CURTAIN && t != CURTAIN) {
+    _channels[i].curtainMove    = CURTAIN_IDLE;
+    _channels[i].curtainActionAt = 0;
+    int si = findChannel(area, channel0 + 1);
+    if (si >= 0 && _channels[si].isCurtainSlave) {
+      removeHADiscoveryForChannel(area, channel0 + 1, CURTAIN);
+      if (si != _chCount - 1) _channels[si] = _channels[_chCount - 1];
+      _chCount--;
+    }
   }
+
+  // Remove the *old* HA entity for this channel before switching type.
+  // removeHADiscoveryForChannel wipes light + switch + cover so it covers
+  // every direction (light→cover, cover→light, etc.).
+  if (oldType != t) {
+    removeHADiscoveryForChannel(area, channel0, oldType);
+  }
+
+  _channels[i].type = t;
+
+  // ── Entering CURTAIN → auto-create/claim slave channel ──────────────────
+  if (t == CURTAIN && !_channels[i].isCurtainSlave) {
+    uint8_t slaveCh = channel0 + 1;
+    int si = findChannel(area, slaveCh);
+    if (si >= 0) {
+      // Channel already exists — retire its current HA entity then mark as slave
+      removeHADiscoveryForChannel(area, slaveCh, _channels[si].type);
+      _channels[si].type           = CURTAIN;
+      _channels[si].isCurtainSlave = true;
+    } else {
+      // Create slave silently (no HA publish, no save during creation)
+      bool prev = _loading; _loading = true;
+      si = touchChannel(area, slaveCh);
+      _loading = prev;
+      if (si >= 0) {
+        _channels[si].type           = CURTAIN;
+        _channels[si].isCurtainSlave = true;
+      }
+    }
+  }
+
+  publishHADiscoveryForChannel(i);
+  saveEntities();
 }
 
 void EntityManager::setChannelLevel(uint8_t area, uint8_t channel0, uint8_t pct) {
@@ -113,8 +163,9 @@ void EntityManager::setChannelOnOff(uint8_t area, uint8_t channel0, bool on) {
 }
 
 extern void publishPresetForArea(uint8_t area);
-extern void removeHADiscoveryForChannel(uint8_t area, uint8_t ch0, DynetEntities::EntityType type);
 extern void removeHADiscoveryForArea(uint8_t area);
+extern void publishHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
+extern void removeHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
 
 void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   int a = touchArea(area);
@@ -372,12 +423,207 @@ bool EntityManager::deleteArea(uint8_t area) {
   int ai = findArea(area);
   if (ai >= 0) {
     removeHADiscoveryForArea(area);
-    if (ai != _arCount - 1) _areas[ai] = _areas[_arCount - 1];
+    // Free this area's curtain array before overwriting the slot
+    if (_areas[ai].curtains) { delete[] _areas[ai].curtains; _areas[ai].curtains = nullptr; }
+    if (ai != _arCount - 1) {
+      _areas[ai] = _areas[_arCount - 1];
+      _areas[_arCount - 1].curtains = nullptr; // prevent double-free of moved pointer
+    }
     _arCount--;
   }
 
   saveEntities();
   LOGF("[EM] deleted Area %u\n", area);
   return (ai >= 0);
+}
+
+// ---- Curtain control -----------------------------------------------
+
+void EntityManager::commandCurtain(uint8_t area, uint8_t ch0, const char* cmd) {
+  int mi = findChannel(area, ch0);
+  if (mi < 0 || _channels[mi].type != CURTAIN || _channels[mi].isCurtainSlave) return;
+
+  ChannelState& m = _channels[mi];
+  uint8_t upCh   = ch0;
+  uint8_t downCh = ch0 + 1;
+
+  if (strcmp(cmd, "OPEN") == 0) {
+    // Interlock: stop DOWN relay immediately, then after 500ms start UP relay
+    dynet.sendFadeToLevel_1s(area, downCh, 0, 0x02);
+    m.curtainMove     = CURTAIN_DELAY_OPEN;
+    m.curtainActionAt = millis() + 500;
+    LOGF("[Curtain] A%u Ch%u OPEN: DOWN off, delay 500ms\n", area, upCh + 1);
+
+  } else if (strcmp(cmd, "CLOSE") == 0) {
+    // Interlock: stop UP relay immediately, then after 500ms start DOWN relay
+    dynet.sendFadeToLevel_1s(area, upCh, 0, 0x02);
+    m.curtainMove     = CURTAIN_DELAY_CLOSE;
+    m.curtainActionAt = millis() + 500;
+    LOGF("[Curtain] A%u Ch%u CLOSE: UP off, delay 500ms\n", area, upCh + 1);
+
+  } else if (strcmp(cmd, "STOP") == 0) {
+    dynet.sendFadeToLevel_1s(area, upCh,   0, 0x02);
+    dynet.sendFadeToLevel_1s(area, downCh, 0, 0x02);
+    m.curtainMove     = CURTAIN_IDLE;
+    m.curtainActionAt = 0;
+    LOGF("[Curtain] A%u Ch%u STOP: both off\n", area, upCh + 1);
+  }
+}
+
+void EntityManager::setCurtainTime(uint8_t area, uint8_t ch0, uint8_t seconds) {
+  int mi = findChannel(area, ch0);
+  if (mi < 0 || _channels[mi].type != CURTAIN || _channels[mi].isCurtainSlave) return;
+  _channels[mi].curtainTimeSec = seconds;
+  saveEntities();
+}
+
+void EntityManager::pollCurtains() {
+  uint32_t now = millis();
+  for (int i = 0; i < _chCount; i++) {
+    ChannelState& c = _channels[i];
+    if (c.type != CURTAIN || c.isCurtainSlave) continue;
+    if (c.curtainMove == CURTAIN_IDLE) continue;
+    if ((int32_t)(now - c.curtainActionAt) < 0) continue; // not yet
+
+    uint8_t upCh   = c.channel0;
+    uint8_t downCh = c.channel0 + 1;
+
+    switch (c.curtainMove) {
+      case CURTAIN_DELAY_OPEN:
+        dynet.sendFadeToLevel_1s(c.area, upCh, 100, 0x02);
+        if (c.curtainTimeSec > 0) {
+          c.curtainMove     = CURTAIN_OPENING;
+          c.curtainActionAt = now + (uint32_t)c.curtainTimeSec * 1000UL;
+        } else {
+          c.curtainMove     = CURTAIN_IDLE;
+          c.curtainActionAt = 0;
+        }
+        LOGF("[Curtain] A%u Ch%u: UP relay ON (travel %us)\n", c.area, upCh+1, c.curtainTimeSec);
+        break;
+
+      case CURTAIN_DELAY_CLOSE:
+        dynet.sendFadeToLevel_1s(c.area, downCh, 100, 0x02);
+        if (c.curtainTimeSec > 0) {
+          c.curtainMove     = CURTAIN_CLOSING;
+          c.curtainActionAt = now + (uint32_t)c.curtainTimeSec * 1000UL;
+        } else {
+          c.curtainMove     = CURTAIN_IDLE;
+          c.curtainActionAt = 0;
+        }
+        LOGF("[Curtain] A%u Ch%u: DOWN relay ON (travel %us)\n", c.area, downCh+1, c.curtainTimeSec);
+        break;
+
+      case CURTAIN_OPENING:
+      case CURTAIN_CLOSING:
+        // Travel time expired — stop both relays
+        dynet.sendFadeToLevel_1s(c.area, upCh,   0, 0x02);
+        dynet.sendFadeToLevel_1s(c.area, downCh, 0, 0x02);
+        c.curtainMove     = CURTAIN_IDLE;
+        c.curtainActionAt = 0;
+        LOGF("[Curtain] A%u Ch%u: travel time expired, both off\n", c.area, upCh+1);
+        break;
+
+      default: break;
+    }
+  }
+}
+
+// ---- Area Curtain (virtual — preset-based) --------------------------
+
+void EntityManager::setAreaType(uint8_t area, AreaType t) {
+  int ai = touchArea(area);
+  if (ai < 0) return;
+  if (_areas[ai].areaType == t) return;
+
+  // Switching FROM curtain to lights: free the curtain array
+  if (_areas[ai].areaType == AREA_CURTAIN && t == AREA_LIGHTS) {
+    if (_areas[ai].curtains) { delete[] _areas[ai].curtains; _areas[ai].curtains = nullptr; }
+  }
+
+  _areas[ai].areaType = t;
+
+  // Switching TO curtain: allocate curtain array + remove channel HA entities
+  if (t == AREA_CURTAIN) {
+    if (!_areas[ai].curtains) {
+      _areas[ai].curtains = new (std::nothrow) AreaCurtainEntry[MAX_CURTAINS_PER_AREA];
+      if (_areas[ai].curtains) {
+        for (int i = 0; i < MAX_CURTAINS_PER_AREA; i++) _areas[ai].curtains[i] = AreaCurtainEntry{};
+      }
+    }
+    for (int i = 0; i < _chCount; i++) {
+      if (_channels[i].area == area && _channels[i].present && !_channels[i].isCurtainSlave) {
+        removeHADiscoveryForChannel(area, _channels[i].channel0, _channels[i].type);
+      }
+    }
+  }
+  // Wipe all stale HA entities for this area then publish the correct new ones
+  removeHADiscoveryForArea(area);
+  publishHADiscoveryForArea(area);
+  saveEntities();
+}
+
+int EntityManager::addAreaCurtain(uint8_t area) {
+  int ai = findArea(area);
+  if (ai < 0) return -1;
+  // Allocate on demand (in case setAreaType was bypassed, e.g. during load)
+  if (!_areas[ai].curtains) {
+    _areas[ai].curtains = new (std::nothrow) AreaCurtainEntry[MAX_CURTAINS_PER_AREA];
+    if (!_areas[ai].curtains) return -1;
+    for (int i = 0; i < MAX_CURTAINS_PER_AREA; i++) _areas[ai].curtains[i] = AreaCurtainEntry{};
+  }
+  for (int i = 0; i < MAX_CURTAINS_PER_AREA; i++) {
+    if (!_areas[ai].curtains[i].used) {
+      _areas[ai].curtains[i] = AreaCurtainEntry{};
+      _areas[ai].curtains[i].used = true;
+      snprintf(_areas[ai].curtains[i].name, sizeof(_areas[ai].curtains[i].name),
+               "Curtain %d", i + 1);
+      publishHADiscoveryForAreaCurtainEntry(area, i);
+      saveEntities();
+      return i;
+    }
+  }
+  return -1; // all slots full
+}
+
+void EntityManager::deleteAreaCurtain(uint8_t area, uint8_t idx) {
+  int ai = findArea(area);
+  if (ai < 0 || idx >= MAX_CURTAINS_PER_AREA || !_areas[ai].curtains) return;
+  if (!_areas[ai].curtains[idx].used) return;
+  removeHADiscoveryForAreaCurtainEntry(area, idx);
+  _areas[ai].curtains[idx] = AreaCurtainEntry{};  // clear slot
+  saveEntities();
+}
+
+void EntityManager::setAreaCurtainEntry(uint8_t area, uint8_t idx,
+                                        const char* name,
+                                        uint8_t openP, uint8_t closeP, uint8_t stopP) {
+  int ai = findArea(area);
+  if (ai < 0 || idx >= MAX_CURTAINS_PER_AREA || !_areas[ai].curtains || !_areas[ai].curtains[idx].used) return;
+  auto& e = _areas[ai].curtains[idx];
+  if (name && name[0]) {
+    strncpy(e.name, name, sizeof(e.name) - 1);
+    e.name[sizeof(e.name) - 1] = '\0';
+  }
+  e.openPreset  = openP;
+  e.closePreset = closeP;
+  e.stopPreset  = stopP;
+  publishHADiscoveryForAreaCurtainEntry(area, idx);
+  saveEntities();
+}
+
+void EntityManager::commandAreaCurtain(uint8_t area, uint8_t curtainIdx, const char* cmd) {
+  int ai = findArea(area);
+  if (ai < 0) return;
+  const AreaState& a = _areas[ai];
+  if (a.areaType != AREA_CURTAIN) return;
+  if (!a.curtains || curtainIdx >= MAX_CURTAINS_PER_AREA || !a.curtains[curtainIdx].used) return;
+  const AreaCurtainEntry& e = a.curtains[curtainIdx];
+  uint8_t preset = 0;
+  if      (strcmp(cmd, "OPEN")  == 0) preset = e.openPreset;
+  else if (strcmp(cmd, "CLOSE") == 0) preset = e.closePreset;
+  else if (strcmp(cmd, "STOP")  == 0) preset = e.stopPreset;
+  if (preset == 0) return;
+  dynet.sendAreaPreset(area, preset, 0);
+  LOGF("[AreaCurtain] A%u ct%u %s -> Preset %u\n", area, curtainIdx, cmd, preset);
 }
 

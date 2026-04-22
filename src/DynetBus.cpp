@@ -17,18 +17,6 @@ static inline void setTX(bool on) {
   if (dePin >= 0) digitalWrite(dePin, on ? HIGH : LOW);
 }
 
-// ---- Auto-sync window (poll preset briefly after bus activity) ----
-static uint32_t g_syncUntilMs = 0;
-static uint8_t  g_syncAreaHint = 0;     // 0 = round-robin all areas, otherwise poll this area only
-static uint8_t  g_rrArea = 2;
-static uint32_t g_nextPresetPollAt = 0;
-
-static inline void dynetRequestSync(uint8_t areaHint, uint32_t durationMs) {
-  g_syncAreaHint = areaHint;                 // 0 or area number
-  g_syncUntilMs  = millis() + durationMs;    // enable polling window
-  if (g_nextPresetPollAt < millis()) g_nextPresetPollAt = millis();
-}
-
 // ================== DynetBus ==================
 DynetBus dynet;
 
@@ -105,11 +93,6 @@ void DynetBus::loop() {
     const uint8_t want = checksum(_rxBuf);
 
     if (want == _rxBuf[7]) {
-    // Start a short sync window for this area whenever we see valid bus traffic.
-    // This ensures Dynalite-origin changes get discovered even if we miss the exact command opcode.
-    const uint8_t area = _rxBuf[1];
-    dynetRequestSync(area, 12000);   // 12 seconds of preset polling after activity
-
     DynetEntities::em.handleLogicalFrame(_rxBuf);
 
     } else {
@@ -236,27 +219,6 @@ void DynetBus::pollAreas() {
     return;
   }
 
-  if ((int32_t)(millis() - g_syncUntilMs) < 0) {
-
-      if (millis() < g_nextPresetPollAt) return;
-
-      const uint8_t maxAreas = (cfg.dynet_max_areas ? cfg.dynet_max_areas : (uint8_t)DYNET_MAX_AREAS);
-
-      uint8_t a = 0;
-      if (g_syncAreaHint >= 2 && g_syncAreaHint <= maxAreas) {
-        a = g_syncAreaHint;   // poll only the active area
-      } else {
-        // round-robin all areas
-        if (g_rrArea < 2) g_rrArea = 2;
-        if (g_rrArea > maxAreas) g_rrArea = 2;
-        a = g_rrArea++;
-      }
-
-      requestPreset(a);                    // 0x63 -> expect 0x62
-      g_nextPresetPollAt = millis() + 1200; // throttle (1.2s). Tune 700–2000ms.
-
-      return;
-    }
 }
 
 // ================== TX HELPERS (opcode in b[2]) ==================
@@ -273,11 +235,6 @@ static inline uint8_t dy64_code_for_preset(uint8_t preset1) {
     case 0: return 0x00; case 1: return 0x01; case 2: return 0x02; case 3: return 0x03;
     case 4: return 0x0A; case 5: return 0x0B; case 6: return 0x0C; default: return 0x0D;
   }
-}
-
-void DynetBus::requestSync(uint8_t area, uint32_t durationMs) {
-  _syncAreaHint = area;                 // 0 means "round robin all"
-  _syncUntilMs = millis() + durationMs; // enable polling window
 }
 
 void DynetBus::sendAreaPreset(uint8_t area, uint8_t preset) {

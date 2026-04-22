@@ -21,7 +21,7 @@ It listens to DyNet traffic on RS485, maps lighting channels to MQTT topics, and
 
 ## Hardware/Software expectations
 
-- **Board**: ESP32 (`esp32dev`) or ESP8266 (`nodemcuv2`)
+- **Board**: ESP32 or ESP8266
 - **Build system**: PlatformIO
 - **Framework**: Arduino
 - **Dependencies**: PubSubClient, ArduinoJson, ESP Async WebServer, Async TCP library for the selected board

@@ -846,8 +846,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
     em.setChannelLevel((uint8_t)area, (uint8_t)ch, pct);
     publishStateForChannel(idx);
-    delay(180);
-    dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+    dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 250);
     return;
   }
 
@@ -858,8 +857,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
     em.setChannelLevel((uint8_t)area, (uint8_t)ch, pct);
     publishStateForChannel(idx);
-    delay(180);
-    dynet.sendRequestChannelLevel((uint8_t)area, (uint8_t)ch);
+    dynet.scheduleLevelReq((uint8_t)area, (uint8_t)ch, 250);
     return;
   }
 

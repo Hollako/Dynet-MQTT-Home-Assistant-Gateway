@@ -22,13 +22,10 @@ struct DynetPhysFrame {
 
 class DynetBus {
 public:
-  void begin(int rxPin, int txPin, int dePin = -1, uint32_t baud = 9600);
   void begin();       // init UART + DE/RE
   void loop();        // read bytes, assemble frames, dispatch to EntityManager
   void pollAreas();   // lightweight periodic polling (optional)
   void requestPreset(uint8_t area);            // ask controller to report current preset (0x63)
-  void requestChannelLevel(uint8_t area, uint8_t ch0); // ask level for channel (0-origin) (0x61)
-  void poll();  
 
   // ---- TX helpers (called from MQTT/WebUI) ----
   // Fade to level (pct 0..100, rampCode is an app-specific byte you used in your WebUI)
@@ -68,11 +65,11 @@ extern void onDynetReportChannelLevel(uint8_t area, uint8_t ch, uint8_t pct);
 extern void onDynetReportPreset(uint8_t area, uint8_t preset0);
 
 // Return the number of active channels in this area (0 = unknown)
-// If not provided, poll() will fall back to DYNET_MAX_CHANNELS or 48.
+// If not provided, polling falls back to DYNET_MAX_CHANNELS or 48.
 extern uint8_t dynetActiveChannelCount(uint8_t area);
 
 // Return whether a channel is active/known in this area.
-// If not provided, poll() will assume all channels are active.
+// If not provided, polling assumes all channels are active.
 extern bool dynetIsChannelActive(uint8_t area, uint8_t ch);
 
 // C-style wrappers used by your .ino

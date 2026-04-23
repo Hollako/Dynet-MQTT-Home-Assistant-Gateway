@@ -108,48 +108,6 @@ static String areaDisplayName(uint8_t area) {
   return String("Area ") + String(area);
 }
 
-// ---- HA Discovery ------------------------------------------------
-// Light (JSON schema) or Switch; we choose by entity.type
-static void publishHADiscovery_LightOrSwitch(const DynetEntities::ChannelState& chs) {
-  using namespace DynetEntities;
-  const bool isLight = (chs.type == LIGHT_DIMMABLE || chs.type == LIGHT_ONOFF);
-  const char* comp   = isLight ? "light" : "switch";
-
-  String sid = mqttSafeId(deviceId);
-  String objId = String("a") + String(chs.area) + "_c" + String(chs.channel0);
-  String discTopic = String(HA_DISCOVERY_PREFIX) + "/" + comp + "/" + sid + "/" + objId + "/config";
-
-  DynamicJsonDocument doc(768);
-  doc["name"]               = String("Area ") + chs.area + " Ch " + (chs.channel0 + 1);
-  doc["unique_id"]          = sid + "_" + objId;
-  doc["availability_topic"] = availabilityTopic();
-
-  String base = channelBaseTopic(chs.area, chs.channel0);
-
-  if (isLight) {
-    // Use JSON schema to handle brightness in one topic
-    doc["schema"]        = "json";
-    doc["command_topic"] = base + "/set";
-    doc["state_topic"]   = base + "/state";
-    doc["brightness"]    = (chs.type == LIGHT_DIMMABLE);
-  } else {
-    // switch
-    doc["command_topic"]   = base + "/set";
-    doc["state_topic"]     = base + "/state";
-    doc["payload_on"]      = "ON";
-    doc["payload_off"]     = "OFF";
-    //doc["optimistic"]      = true;
-  }
-
-  // <-- per-area device block
-  addHadeviceBlockForArea(doc, chs.area);
-
-  String payload; serializeJson(doc, payload);
-  mqtt.publish(discTopic.c_str(), payload.c_str(), true);
-  // prime state as unknown
-  mqtt.publish((base + "/state").c_str(), "{\"state\":\"unknown\"}", true);
-}
-
 // Temperature sensor
 static void publishHADiscovery_TempSensor(uint8_t area) {
   String sid = mqttSafeId(deviceId);
@@ -185,6 +143,57 @@ static void publishHADiscovery_SetpointNumber(uint8_t area) {
   mqtt.publish(discTopic.c_str(), payload.c_str(), true);
 }
 
+// --- HVAC climate entity ---
+static void publishHADiscovery_Climate(uint8_t area) {
+  using namespace DynetEntities;
+  int ai = em.findArea(area);
+  if (ai < 0 || !em.areaAt(ai).hvac) return;
+  const HvacConfig& h = *em.areaAt(ai).hvac;
+
+  String sid    = mqttSafeId(deviceId);
+  String objId  = String("a") + area + "_climate";
+  String discTopic = String(HA_DISCOVERY_PREFIX) + "/climate/" + sid + "/" + objId + "/config";
+  String aBase  = areaBaseTopic(area);
+
+  DynamicJsonDocument doc(1536);
+  addHadeviceBlockForArea(doc, area);
+  doc["unique_id"]          = sid + "_" + objId;
+  doc["name"]               = areaDisplayName(area);
+  doc["availability_topic"] = availabilityTopic();
+
+  // Temperature
+  doc["current_temperature_topic"] = aBase + "/temperature";
+  doc["temperature_state_topic"]   = aBase + "/setpoint";
+  doc["temperature_command_topic"] = aBase + "/setpoint/set";
+  doc["temperature_unit"]          = "C";
+  doc["min_temp"] = 10;
+  doc["max_temp"] = 35;
+  doc["temp_step"] = 0.5;
+
+  // Modes
+  doc["mode_state_topic"]   = aBase + "/hvac/mode";
+  doc["mode_command_topic"] = aBase + "/hvac/mode/set";
+  JsonArray modes = doc.createNestedArray("modes");
+  for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
+    if (h.modes[i].used && h.modes[i].name[0]) modes.add(String(h.modes[i].name));
+  }
+  if (modes.size() == 0) { modes.add("off"); modes.add("cool"); }  // safe defaults
+
+  // Fan modes (only if configured)
+  if (h.fanCount > 0) {
+    doc["fan_mode_state_topic"]   = aBase + "/hvac/fan";
+    doc["fan_mode_command_topic"] = aBase + "/hvac/fan/set";
+    JsonArray fans = doc.createNestedArray("fan_modes");
+    for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
+      if (h.fanModes[i].used && h.fanModes[i].name[0]) fans.add(String(h.fanModes[i].name));
+    }
+  }
+
+  String payload; serializeJson(doc, payload);
+  mqtt.publish(discTopic.c_str(), payload.c_str(), true);
+  LOGF("[HA] climate discovery published: A%u\n", area);
+}
+
 // --- Preset "select" entity (HA MQTT Select) ---
 static void publishHADiscovery_PresetSelect(uint8_t area) {
   String sid = mqttSafeId(deviceId);
@@ -199,7 +208,11 @@ static void publishHADiscovery_PresetSelect(uint8_t area) {
   doc["availability_topic"] = availabilityTopic();
 
   JsonArray opts = doc.createNestedArray("options");
-  uint8_t pCount = cfg.ha_preset_count ? cfg.ha_preset_count : 4;
+  // Use per-area preset count; fall back to global cfg if not set
+  int ai_ps = DynetEntities::em.findArea(area);
+  uint8_t pCount = (ai_ps >= 0 && DynetEntities::em.areaAt(ai_ps).presetCount)
+                   ? DynetEntities::em.areaAt(ai_ps).presetCount
+                   : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
   if (pCount > 128) pCount = 128;
   for (int p = 1; p <= pCount; ++p) opts.add(String(p));
 
@@ -231,7 +244,7 @@ void publishHADiscoveryForChannel(int idx) {
   String comp  = (chs.type == SWITCH_ONOFF) ? "switch" : "light";
   String cfgTopic = String(HA_DISCOVERY_PREFIX) + "/" + comp + "/" + sid + "/" + objId + "/config";
   LOGF("[HA] preparing discovery for A%u C%u as %s\n", chs.area, chs.channel0, (chs.type==SWITCH_ONOFF?"switch":"light"));
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(768);                    // 768 to avoid silent truncation of device block
   addHadeviceBlockForArea(doc, chs.area);          // your existing helper
   doc["unique_id"] = sid + "_" + objId;
   doc["name"]      = (chs.name[0])
@@ -239,14 +252,13 @@ void publishHADiscoveryForChannel(int idx) {
                    : (String("Area ") + chs.area + " Ch " + (chs.channel0 + 1));
   String base      = channelBaseTopic(chs.area, chs.channel0);
   doc["state_topic"]   = base + "/state";
-  doc["availability_topic"] = availabilityTopic();       // if you have a helper; else set availability_topic + payloads
+  doc["availability_topic"] = availabilityTopic();
 
   if (chs.type == SWITCH_ONOFF) {
     // SWITCH -> plain payloads
     doc["command_topic"] = base + "/set";
     doc["payload_on"]    = "ON";
     doc["payload_off"]   = "OFF";
-    // Do NOT set optimistic: true (keeps UI as single toggle)
   } else {
     // LIGHT (both dimmable and on/off) -> JSON light schema
     doc["schema"]        = "json";
@@ -260,7 +272,18 @@ void publishHADiscoveryForChannel(int idx) {
   mqtt.publish(cfgTopic.c_str(), payload.c_str(), true);
   LOGF("[HA] discovery published: %s\n", cfgTopic.c_str());
 
-  // 2) Then remove the opposite component (if any)
+  // 2) Publish a retained initial state so HA immediately shows the entity
+  //    (without this, light+JSON-schema entities stay invisible until first real state arrives)
+  if (chs.type == SWITCH_ONOFF) {
+    mqtt.publish((base + "/state").c_str(), chs.isOn ? "ON" : "OFF", true);
+  } else {
+    int bri = (int)((chs.levelPct * 255 + 50) / 100);
+    String st = String("{\"state\":\"") + (chs.isOn ? "ON" : "OFF") +
+                "\",\"brightness\":" + bri + "}";
+    mqtt.publish((base + "/state").c_str(), st.c_str(), true);
+  }
+
+  // 3) Then remove the opposite component (if any)
   retireOppositeDiscovery(chs.area, chs.channel0, chs.type);
 }
 
@@ -323,10 +346,14 @@ void publishHADiscoveryForArea(uint8_t area) {
     return;
   }
 
-  // Default Lights area: temp sensor + setpoint + save preset button + preset select
-  publishHADiscovery_TempSensor(area);
-  publishHADiscovery_SetpointNumber(area);
-  // Save preset button
+  // HVAC area: climate entity only (temp/setpoint handled inside climate)
+  if (ai >= 0 && em.areaAt(ai).areaType == AREA_HVAC) {
+    publishHADiscovery_Climate(area);
+    return;
+  }
+
+  // Default Lights area: save preset button + preset select
+  // (temp sensor is published on-demand when first temp opcode arrives)
   {
     String sid = mqttSafeId(deviceId);
     String objId = String("a") + String(area) + "_save_preset";
@@ -412,6 +439,8 @@ void removeHADiscoveryForArea(uint8_t area) {
   // also wipe the legacy area-level cover entity (a<N>_cover) so stale retained
   // messages from older firmware versions are cleared from the broker
   mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/a" + area + "_cover/config").c_str(), "", true);
+  // climate entity (HVAC)
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/climate/" + sid + "/a" + area + "_climate/config").c_str(), "", true);
   LOGF("[HA] removed discovery for Area %u\n", area);
 }
 
@@ -588,10 +617,22 @@ void publishSensorsForArea(uint8_t area) {
   if (as.hasTemp && !isnan(as.tempC)) {
     String t = String(as.tempC, 2);
     mqtt.publish((aBase + "/temperature").c_str(), t.c_str(), true);
+    // For non-HVAC areas auto-publish temp sensor discovery on first receipt
+    if (as.areaType != AREA_HVAC) {
+      publishHADiscovery_TempSensor(area);
+    }
   }
   if (as.hasSetpt && !isnan(as.setptC)) {
     String s = String(as.setptC, 2);
     mqtt.publish((aBase + "/setpoint").c_str(), s.c_str(), true);
+  }
+  // HVAC: publish current mode and fan state so climate entity stays in sync
+  if (as.areaType == AREA_HVAC && as.hvac) {
+    const HvacConfig& h = *as.hvac;
+    if (h.currentMode[0])
+      mqtt.publish((aBase + "/hvac/mode").c_str(), h.currentMode, true);
+    if (h.currentFanMode[0])
+      mqtt.publish((aBase + "/hvac/fan").c_str(), h.currentFanMode, true);
   }
 }
 
@@ -688,6 +729,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       em.noteReportPreset((uint8_t)area, (uint8_t)(preset - 1));
       publishPresetForArea((uint8_t)area);
     }
+    return;
+  }
+
+  // HVAC mode command: area/<N>/hvac/mode/set
+  if (afterArea == "hvac/mode/set") {
+    using namespace DynetEntities;
+    em.commandHvacMode((uint8_t)area, msg.c_str());
+    return;
+  }
+
+  // HVAC fan mode command: area/<N>/hvac/fan/set
+  if (afterArea == "hvac/fan/set") {
+    using namespace DynetEntities;
+    em.commandHvacFanMode((uint8_t)area, msg.c_str());
     return;
   }
 
@@ -892,6 +947,8 @@ static void subscribeAll() {
   mqtt.subscribe((base + "area/+/reqpreset").c_str());
   mqtt.subscribe((base + "area/+/reqlevels").c_str());
   mqtt.subscribe((base + "area/+/setpoint/set").c_str());
+  mqtt.subscribe((base + "area/+/hvac/mode/set").c_str());
+  mqtt.subscribe((base + "area/+/hvac/fan/set").c_str());
   mqtt.subscribe((base + "area/+/curtain/+/cover/set").c_str());
   mqtt.subscribe((base + "area/+/ch/+/cover/set").c_str());
   mqtt.subscribe((base + "gateway/+").c_str());
@@ -903,7 +960,7 @@ void mqttEnsureConnected() {
   if (mqtt.connected()) return;
 
   mqtt.setServer(cfg.mqtt_server, cfg.mqtt_port);
-  mqtt.setBufferSize(768);
+  mqtt.setBufferSize(1536);  // climate entity discovery can exceed 768 bytes
   mqtt.setCallback(mqttCallback);
 
   String willTopic = availabilityTopic();

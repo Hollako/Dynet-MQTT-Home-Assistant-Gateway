@@ -26,9 +26,10 @@ static float fp_toC(uint8_t hi, uint8_t lo) {
 void EntityManager::begin() {
   if (_channels) { delete[] _channels; _channels = nullptr; }
   if (_areas) {
-    // Free per-area curtain arrays before releasing the area slab
+    // Free per-area heap pointers before releasing the area slab
     for (int i = 0; i < _arCap; i++) {
       if (_areas[i].curtains) { delete[] _areas[i].curtains; _areas[i].curtains = nullptr; }
+      if (_areas[i].hvac)     { delete   _areas[i].hvac;     _areas[i].hvac     = nullptr; }
     }
     delete[] _areas; _areas = nullptr;
   }
@@ -86,6 +87,7 @@ int EntityManager::touchChannel(uint8_t area, uint8_t channel0) {
   // Suppress publish/save during bulk load
   if (!_loading) {
     publishHADiscoveryForChannel(created);
+    publishStateForChannel(created);   // publish initial OFF state so HA shows entity immediately
     saveEntities();
   }
   return created;
@@ -174,6 +176,26 @@ void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   if (a >= 0) {
     prev = _areas[a].preset0;
     _areas[a].preset0 = preset0;
+  }
+
+  // HVAC areas: map preset to mode/fan state, skip preset entity + level requests
+  if (a >= 0 && _areas[a].areaType == AREA_HVAC && _areas[a].hvac) {
+    auto& h = *_areas[a].hvac;
+    for (uint8_t i = 0; i < h.modeCount; i++) {
+      if (h.modes[i].used && h.modes[i].preset1 == preset0 + 1) {
+        strncpy(h.currentMode, h.modes[i].name, sizeof(h.currentMode) - 1);
+        h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+      }
+    }
+    for (uint8_t i = 0; i < h.fanCount; i++) {
+      if (h.fanModes[i].used && h.fanModes[i].preset1 == preset0 + 1) {
+        strncpy(h.currentFanMode, h.fanModes[i].name, sizeof(h.currentFanMode) - 1);
+        h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+      }
+    }
+    publishSensorsForArea(area);  // publishes temp + setpoint + mode + fan state
+    saveEntities();
+    return;
   }
 
   publishPresetForArea(area);
@@ -423,11 +445,13 @@ bool EntityManager::deleteArea(uint8_t area) {
   int ai = findArea(area);
   if (ai >= 0) {
     removeHADiscoveryForArea(area);
-    // Free this area's curtain array before overwriting the slot
+    // Free this area's heap pointers before overwriting the slot
     if (_areas[ai].curtains) { delete[] _areas[ai].curtains; _areas[ai].curtains = nullptr; }
+    if (_areas[ai].hvac)     { delete   _areas[ai].hvac;     _areas[ai].hvac     = nullptr; }
     if (ai != _arCount - 1) {
       _areas[ai] = _areas[_arCount - 1];
-      _areas[_arCount - 1].curtains = nullptr; // prevent double-free of moved pointer
+      _areas[_arCount - 1].curtains = nullptr; // prevent double-free of moved pointers
+      _areas[_arCount - 1].hvac     = nullptr;
     }
     _arCount--;
   }
@@ -535,14 +559,18 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
   if (ai < 0) return;
   if (_areas[ai].areaType == t) return;
 
-  // Switching FROM curtain to lights: free the curtain array
-  if (_areas[ai].areaType == AREA_CURTAIN && t == AREA_LIGHTS) {
+  // Leaving CURTAIN: free curtain array
+  if (_areas[ai].areaType == AREA_CURTAIN && t != AREA_CURTAIN) {
     if (_areas[ai].curtains) { delete[] _areas[ai].curtains; _areas[ai].curtains = nullptr; }
+  }
+  // Leaving HVAC: free hvac config
+  if (_areas[ai].areaType == AREA_HVAC && t != AREA_HVAC) {
+    if (_areas[ai].hvac) { delete _areas[ai].hvac; _areas[ai].hvac = nullptr; }
   }
 
   _areas[ai].areaType = t;
 
-  // Switching TO curtain: allocate curtain array + remove channel HA entities
+  // Entering CURTAIN: allocate curtain array + remove channel HA entities
   if (t == AREA_CURTAIN) {
     if (!_areas[ai].curtains) {
       _areas[ai].curtains = new (std::nothrow) AreaCurtainEntry[MAX_CURTAINS_PER_AREA];
@@ -550,6 +578,18 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
         for (int i = 0; i < MAX_CURTAINS_PER_AREA; i++) _areas[ai].curtains[i] = AreaCurtainEntry{};
       }
     }
+    for (int i = 0; i < _chCount; i++) {
+      if (_channels[i].area == area && _channels[i].present && !_channels[i].isCurtainSlave) {
+        removeHADiscoveryForChannel(area, _channels[i].channel0, _channels[i].type);
+      }
+    }
+  }
+  // Entering HVAC: allocate hvac config
+  if (t == AREA_HVAC) {
+    if (!_areas[ai].hvac) {
+      _areas[ai].hvac = new (std::nothrow) HvacConfig{};
+    }
+    // Hide all channel entities — HVAC areas are controlled via climate entity
     for (int i = 0; i < _chCount; i++) {
       if (_channels[i].area == area && _channels[i].present && !_channels[i].isCurtainSlave) {
         removeHADiscoveryForChannel(area, _channels[i].channel0, _channels[i].type);
@@ -625,5 +665,105 @@ void EntityManager::commandAreaCurtain(uint8_t area, uint8_t curtainIdx, const c
   if (preset == 0) return;
   dynet.sendAreaPreset(area, preset, 0);
   LOGF("[AreaCurtain] A%u ct%u %s -> Preset %u\n", area, curtainIdx, cmd, preset);
+}
+
+// ---- HVAC area management ------------------------------------------
+
+int EntityManager::addHvacMode(uint8_t area, const char* name, uint8_t preset1) {
+  int ai = findArea(area);
+  if (ai < 0 || _areas[ai].areaType != AREA_HVAC) return -1;
+  if (!_areas[ai].hvac) return -1;
+  auto& h = *_areas[ai].hvac;
+  if (h.modeCount >= MAX_HVAC_MODES) return -1;
+  for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
+    if (!h.modes[i].used) {
+      h.modes[i].used = true;
+      h.modes[i].preset1 = preset1;
+      strncpy(h.modes[i].name, name ? name : "", sizeof(h.modes[i].name) - 1);
+      h.modes[i].name[sizeof(h.modes[i].name) - 1] = '\0';
+      h.modeCount++;
+      publishHADiscoveryForArea(area);
+      saveEntities();
+      return i;
+    }
+  }
+  return -1;
+}
+
+int EntityManager::addHvacFanMode(uint8_t area, const char* name, uint8_t preset1) {
+  int ai = findArea(area);
+  if (ai < 0 || _areas[ai].areaType != AREA_HVAC) return -1;
+  if (!_areas[ai].hvac) return -1;
+  auto& h = *_areas[ai].hvac;
+  if (h.fanCount >= MAX_HVAC_FANMODES) return -1;
+  for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
+    if (!h.fanModes[i].used) {
+      h.fanModes[i].used = true;
+      h.fanModes[i].preset1 = preset1;
+      strncpy(h.fanModes[i].name, name ? name : "", sizeof(h.fanModes[i].name) - 1);
+      h.fanModes[i].name[sizeof(h.fanModes[i].name) - 1] = '\0';
+      h.fanCount++;
+      publishHADiscoveryForArea(area);
+      saveEntities();
+      return i;
+    }
+  }
+  return -1;
+}
+
+void EntityManager::deleteHvacMode(uint8_t area, uint8_t idx) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac || idx >= MAX_HVAC_MODES) return;
+  auto& h = *_areas[ai].hvac;
+  if (!h.modes[idx].used) return;
+  h.modes[idx] = HvacModeEntry{};
+  if (h.modeCount > 0) h.modeCount--;
+  publishHADiscoveryForArea(area);
+  saveEntities();
+}
+
+void EntityManager::deleteHvacFanMode(uint8_t area, uint8_t idx) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac || idx >= MAX_HVAC_FANMODES) return;
+  auto& h = *_areas[ai].hvac;
+  if (!h.fanModes[idx].used) return;
+  h.fanModes[idx] = HvacModeEntry{};
+  if (h.fanCount > 0) h.fanCount--;
+  publishHADiscoveryForArea(area);
+  saveEntities();
+}
+
+void EntityManager::commandHvacMode(uint8_t area, const char* modeName) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
+    if (h.modes[i].used && strcmp(h.modes[i].name, modeName) == 0) {
+      dynet.sendAreaPreset(area, h.modes[i].preset1, 0);
+      strncpy(h.currentMode, modeName, sizeof(h.currentMode) - 1);
+      h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+      publishSensorsForArea(area);
+      LOGF("[HVAC] A%u mode '%s' -> Preset %u\n", area, modeName, h.modes[i].preset1);
+      return;
+    }
+  }
+  LOGF("[HVAC] A%u mode '%s' not found\n", area, modeName);
+}
+
+void EntityManager::commandHvacFanMode(uint8_t area, const char* fanName) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
+    if (h.fanModes[i].used && strcmp(h.fanModes[i].name, fanName) == 0) {
+      dynet.sendAreaPreset(area, h.fanModes[i].preset1, 0);
+      strncpy(h.currentFanMode, fanName, sizeof(h.currentFanMode) - 1);
+      h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+      publishSensorsForArea(area);
+      LOGF("[HVAC] A%u fan '%s' -> Preset %u\n", area, fanName, h.fanModes[i].preset1);
+      return;
+    }
+  }
+  LOGF("[HVAC] A%u fan '%s' not found\n", area, fanName);
 }
 

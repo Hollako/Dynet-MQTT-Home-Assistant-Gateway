@@ -94,10 +94,10 @@ void beginSTAIfCreds() {
 #else
   WiFi.setSleep(false);
 #endif
-  WiFi.hostname(deviceId.c_str());
 
   WiFi.disconnect(true);
   delay(50);
+  WiFi.hostname(deviceId.c_str());   // must be set AFTER disconnect; disconnect resets it on ESP8266
   WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
 
   staBusy = true;

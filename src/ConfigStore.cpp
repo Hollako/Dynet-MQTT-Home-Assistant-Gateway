@@ -133,12 +133,20 @@ bool loadEntities() {
             ar.name[sizeof(ar.name) - 1] = '\0';
           }
         }
-        // Area type + per-curtain entries
+        if (v.containsKey("pc")) {
+          int ai2 = em.findArea(area);
+          if (ai2 >= 0) {
+            uint8_t pc = (uint8_t)constrain((int)v["pc"], 1, 128);
+            em.areaAtMut(ai2).presetCount = pc;
+          }
+        }
+        // Area type + per-curtain/hvac entries
         if (v.containsKey("at")) {
           int ai2 = em.findArea(area);
           if (ai2 >= 0) {
             auto& ar = em.areaAtMut(ai2);
             ar.areaType = (DynetEntities::AreaType)(uint8_t)v["at"];
+
             // Allocate curtain array on demand
             if (ar.areaType == DynetEntities::AREA_CURTAIN && !ar.curtains) {
               ar.curtains = new (std::nothrow) DynetEntities::AreaCurtainEntry[DynetEntities::MAX_CURTAINS_PER_AREA];
@@ -161,6 +169,44 @@ bool loadEntities() {
                 }
                 ci++;
                 delay(0);
+              }
+            }
+
+            // Allocate HVAC config on demand
+            if (ar.areaType == DynetEntities::AREA_HVAC && !ar.hvac) {
+              ar.hvac = new (std::nothrow) DynetEntities::HvacConfig{};
+            }
+            if (ar.hvac && v.containsKey("hvac")) {
+              JsonObject hv = v["hvac"].as<JsonObject>();
+              if (hv.containsKey("modes") && hv["modes"].is<JsonArray>()) {
+                uint8_t mi = 0;
+                for (JsonObject me : hv["modes"].as<JsonArray>()) {
+                  if (mi >= DynetEntities::MAX_HVAC_MODES) break;
+                  ar.hvac->modes[mi].used    = true;
+                  ar.hvac->modes[mi].preset1 = me["p"] | 1;
+                  if (me.containsKey("n") && me["n"].is<const char*>()) {
+                    strncpy(ar.hvac->modes[mi].name, (const char*)me["n"], sizeof(ar.hvac->modes[mi].name) - 1);
+                    ar.hvac->modes[mi].name[sizeof(ar.hvac->modes[mi].name) - 1] = '\0';
+                  }
+                  ar.hvac->modeCount++;
+                  mi++;
+                  delay(0);
+                }
+              }
+              if (hv.containsKey("fans") && hv["fans"].is<JsonArray>()) {
+                uint8_t fi = 0;
+                for (JsonObject fe : hv["fans"].as<JsonArray>()) {
+                  if (fi >= DynetEntities::MAX_HVAC_FANMODES) break;
+                  ar.hvac->fanModes[fi].used    = true;
+                  ar.hvac->fanModes[fi].preset1 = fe["p"] | 1;
+                  if (fe.containsKey("n") && fe["n"].is<const char*>()) {
+                    strncpy(ar.hvac->fanModes[fi].name, (const char*)fe["n"], sizeof(ar.hvac->fanModes[fi].name) - 1);
+                    ar.hvac->fanModes[fi].name[sizeof(ar.hvac->fanModes[fi].name) - 1] = '\0';
+                  }
+                  ar.hvac->fanCount++;
+                  fi++;
+                  delay(0);
+                }
               }
             }
           }
@@ -206,7 +252,8 @@ bool saveEntities() {
     if (a.hasTemp)  o["tempC"]  = a.tempC;
     if (a.hasSetpt) o["setptC"] = a.setptC;
     if (a.name[0])  o["n"]      = a.name;
-    if (a.areaType != DynetEntities::AREA_LIGHTS && a.curtains) {
+    o["pc"] = a.presetCount ? a.presetCount : 4;
+    if (a.areaType == DynetEntities::AREA_CURTAIN && a.curtains) {
       o["at"] = (uint8_t)a.areaType;
       JsonArray cArr = o.createNestedArray("curtains");
       for (uint8_t ci = 0; ci < DynetEntities::MAX_CURTAINS_PER_AREA; ci++) {
@@ -217,6 +264,26 @@ bool saveEntities() {
         co["op"] = ce.openPreset;
         co["cl"] = ce.closePreset;
         co["st"] = ce.stopPreset;
+      }
+    }
+    if (a.areaType == DynetEntities::AREA_HVAC && a.hvac) {
+      o["at"] = (uint8_t)a.areaType;
+      JsonObject hv = o.createNestedObject("hvac");
+      JsonArray mArr = hv.createNestedArray("modes");
+      for (uint8_t mi = 0; mi < DynetEntities::MAX_HVAC_MODES; mi++) {
+        const auto& me = a.hvac->modes[mi];
+        if (!me.used) continue;
+        JsonObject mo = mArr.createNestedObject();
+        mo["n"] = me.name;
+        mo["p"] = me.preset1;
+      }
+      JsonArray fArr = hv.createNestedArray("fans");
+      for (uint8_t fi = 0; fi < DynetEntities::MAX_HVAC_FANMODES; fi++) {
+        const auto& fe = a.hvac->fanModes[fi];
+        if (!fe.used) continue;
+        JsonObject fo = fArr.createNestedObject();
+        fo["n"] = fe.name;
+        fo["p"] = fe.preset1;
       }
     }
   }

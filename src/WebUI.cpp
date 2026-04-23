@@ -217,31 +217,7 @@ void handleRootGet() {
       "</div>"
     "</div>"
   ));
-  pageWrite(F(
-        "<div class='card'>"
-          "<div class='section-title'>DyNet • Send Setpoint (test)</div>"
-          "<div class='form-inline' style='gap:10px;flex-wrap:wrap'>"
-            "<label>Area</label>"
-            "<input class='in' id='sp_area' type='number' min='1' max='255' value='2' style='width:90px'>"
-            "<label>Setpoint (°C)</label>"
-            "<input class='in' id='sp_temp' type='number' step='0.5' min='10' max='35' value='22.0' style='width:120px'>"
-            "<button class='btn action' onclick='sendSP()'>Send</button>"
-            "<span id='sp_status' class='muted'></span>"
-          "</div>"
-        "</div>"
-      ));
-      pageWrite(F(
-        "<script>"
-        "function sendSP(){"
-        " const a=Number(document.getElementById('sp_area').value)||1;"
-        " const t=Number(document.getElementById('sp_temp').value)||22;"
-        " const s=document.getElementById('sp_status');"
-        " s.textContent='Sending…';"
-        " fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+a+'&do=set_setpoint&val='+t})"
-        "  .then(r=>r.json()).then(j=>{s.textContent=j.ok?'Sent ✓':'Failed';}).catch(()=>{s.textContent='Error';});"
-        "}"
-        "</script>"
-      ));
+  // (Setpoint test card removed — HVAC setpoint is now managed via HA climate entity)
       
   pageWrite(F("<p style='font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:10px 0 4px'>Areas &amp; Channels</p>"));
 
@@ -282,25 +258,18 @@ void handleRootGet() {
         pageWrite(String(as.area)); pageWrite(F(",this.value)'>"));
         pageWrite(String("<option value='0'") + ((as.areaType==DynetEntities::AREA_LIGHTS)?"  selected":"") + ">Lights</option>");
         pageWrite(String("<option value='1'") + ((as.areaType==DynetEntities::AREA_CURTAIN)?" selected":"") + ">Curtain</option>");
+        pageWrite(String("<option value='2'") + ((as.areaType==DynetEntities::AREA_HVAC)?   " selected":"") + ">HVAC</option>");
         pageWrite(F("</select>"));
 
-        // Status pills
+        // Status pill: preset only (temp moved to HVAC card body)
         pageWrite(F("<span class='pill' id='preset_A")); pageWrite(String(as.area));
         pageWrite(F("'>P:&nbsp;"));
         pageWrite((as.preset0 == 0xFF) ? String("?") : String((int)as.preset0 + 1));
         pageWrite(F("</span>"));
 
-        pageWrite(F("<span class='pill' id='temp_A")); pageWrite(String(as.area));
-        if (as.hasTemp) { pageWrite(F("'>")); pageWrite(String(as.tempC,1)); pageWrite(F("°C</span>")); }
-        else            { pageWrite(F("' style='display:none'>–°C</span>")); }
-
-        pageWrite(F("<span class='pill' id='setpt_A")); pageWrite(String(as.area));
-        if (as.hasSetpt) { pageWrite(F("'>SP:")); pageWrite(String(as.setptC,1)); pageWrite(F("°C</span>")); }
-        else             { pageWrite(F("' style='display:none'>SP:–</span>")); }
-
       pageWrite(F("</div>")); // left group
 
-      // Right: add-channel / add-curtain + delete area
+      // Right: add-channel / add-curtain / add-hvac-mode + delete area
       pageWrite(F("<div class='row' style='gap:4px;flex-shrink:0;align-items:center'>"));
         if (as.areaType == DynetEntities::AREA_LIGHTS) {
           pageWrite(F("<span style='font-size:12px;color:var(--muted);white-space:nowrap'>Add Channel:</span>"));
@@ -308,9 +277,14 @@ void handleRootGet() {
           pageWrite(F("' type='number' class='in' min='1' max='255' placeholder='Ch#' style='width:54px;padding:3px 5px;min-width:0'>"));
           pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addCh(")); pageWrite(String(as.area));
           pageWrite(F(",\"ac_")); pageWrite(String(as.area)); pageWrite(F("\")'>+Ch</button>"));
-        } else {
+        } else if (as.areaType == DynetEntities::AREA_CURTAIN) {
           pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addAreaCurtain("));
           pageWrite(String(as.area)); pageWrite(F(")'>+Curtain</button>"));
+        } else if (as.areaType == DynetEntities::AREA_HVAC) {
+          pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addHvacMode("));
+          pageWrite(String(as.area)); pageWrite(F(")'>+Mode</button>"));
+          pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addHvacFan("));
+          pageWrite(String(as.area)); pageWrite(F(")'>+Fan</button>"));
         }
         pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 8px;min-width:auto;min-height:auto;font-size:13px' title='Delete Area' onclick='delArea("));
         pageWrite(String(as.area)); pageWrite(F(")'>&#10006;</button>"));
@@ -320,16 +294,21 @@ void handleRootGet() {
 
     if (as.areaType == DynetEntities::AREA_CURTAIN) {
       // ── Curtain Area: preset count selector + per-curtain cards ─────────────
-      uint8_t pCount = cfg.ha_preset_count ? cfg.ha_preset_count : 4;
+      uint8_t pCount = as.presetCount ? as.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
       if (pCount > 128) pCount = 128;
 
       // Preset count selector row (no P1..Pn buttons, just the count dropdown)
       pageWrite(F("<div class='row' style='margin-top:6px;gap:6px;align-items:center;flex-wrap:wrap'>"));
         pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Presets available:</span>"));
-        pageWrite(F("<select class='pcSel in' onchange='setPC(this.value)' title='Number of presets'"
+        pageWrite(F("<select class='pcSel in' data-area='"));
+        pageWrite(String(as.area));
+        pageWrite(F("' onchange='setPC("));
+        pageWrite(String(as.area));
+        pageWrite(F(",this.value)' title='Number of presets'"
                     " style='padding:2px 6px;min-width:auto;width:auto;font-size:13px'>"));
         for (int n = 1; n <= 128; n++) {
-          pageWrite(String("<option value='") + n + "'>" + n + "</option>");
+          if (n == pCount) pageWrite(String("<option value='") + n + "' selected>" + n + "</option>");
+          else             pageWrite(String("<option value='") + n + "'>" + n + "</option>");
         }
         pageWrite(F("</select>"));
       pageWrite(F("</div>")); // preset count row
@@ -366,7 +345,8 @@ void handleRootGet() {
               auto presetRow2 = [&](const char* label, const char* sfx, uint8_t cur, const char* cmd, const char* btnIcon) {
                 pageWrite(F("<div class='row' style='gap:6px;align-items:center'>"));
                   pageWrite(F("<span style='font-size:13px;min-width:52px;white-space:nowrap'>")); pageWrite(label); pageWrite(F("</span>"));
-                  pageWrite(F("<select class='in curtainPresetSel' id='")); pageWrite(sfx); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(ci));
+                  pageWrite(F("<select class='in curtainPresetSel' data-area='"));  pageWrite(String(as.area));
+                  pageWrite(F("' id='")); pageWrite(sfx); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(ci));
                   pageWrite(F("' style='padding:2px 6px;min-width:auto;width:auto;font-size:13px'>"));
                   for (uint8_t p = 1; p <= pCount; p++) {
                     pageWrite(String("<option value='") + p + "'" + ((cur==p)?" selected":"") + ">P" + p + "</option>");
@@ -394,14 +374,16 @@ void handleRootGet() {
       }
       pageWrite(F("</div>")); // flex-wrap curtains row
 
-    } else {
+    } else if (as.areaType == DynetEntities::AREA_LIGHTS) {
     // ── Area action row: preset buttons + count selector + utility buttons ──
     pageWrite(F("<div class='row' style='margin-top:5px;flex-wrap:wrap;gap:5px;align-items:center'>"));
 
-      // Preset buttons P1..P8 (visibility controlled by JS via class 'pb' + data-p)
+      // Preset buttons P1..Pn (visibility controlled by JS via class 'pb' + data-area + data-p)
       {
         for (int p = 1; p <= 128; p++) {
-          pageWrite(F("<button class='btn action pb' data-p='"));
+          pageWrite(F("<button class='btn action pb' data-area='"));
+          pageWrite(String(as.area));
+          pageWrite(F("' data-p='"));
           pageWrite(String(p));
           pageWrite(F("' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick='sendPreset("));
           pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(p));
@@ -409,13 +391,21 @@ void handleRootGet() {
         }
       }
 
-      // Preset count dropdown
-      pageWrite(F("<select class='pcSel in' onchange='setPC(this.value)' title='Number of presets shown'"
-                  " style='padding:2px 4px;min-width:auto;width:auto;font-size:12px'>"));
-      for (int n = 1; n <= 128; n++) {
-        pageWrite(String("<option value='") + n + "'>" + n + "</option>");
+      // Preset count dropdown — per area, pre-selected to this area's count
+      {
+        uint8_t thisPc = as.presetCount ? as.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
+        pageWrite(F("<select class='pcSel in' data-area='"));
+        pageWrite(String(as.area));
+        pageWrite(F("' onchange='setPC("));
+        pageWrite(String(as.area));
+        pageWrite(F(",this.value)' title='Number of presets shown'"
+                    " style='padding:2px 4px;min-width:auto;width:auto;font-size:12px'>"));
+        for (int n = 1; n <= 128; n++) {
+          if (n == thisPc) pageWrite(String("<option value='") + n + "' selected>" + n + "</option>");
+          else             pageWrite(String("<option value='") + n + "'>" + n + "</option>");
+        }
+        pageWrite(F("</select>"));
       }
-      pageWrite(F("</select>"));
 
       // Divider
       pageWrite(F("<span style='width:1px;height:18px;background:var(--border);display:inline-block;margin:0 2px'></span>"));
@@ -528,6 +518,85 @@ void handleRootGet() {
 
     pageWrite(F("</div>")); // grid
     } // end else AREA_LIGHTS
+
+    // ── HVAC Area body ───────────────────────────────────────────────────────
+    if (as.areaType == DynetEntities::AREA_HVAC) {
+      // Temperature / setpoint live display
+      pageWrite(F("<div class='row' style='margin-top:6px;gap:10px;align-items:center;flex-wrap:wrap'>"));
+        pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Current Temp:</span>"));
+        pageWrite(F("<span class='pill' id='hvac_temp_A")); pageWrite(String(as.area));
+        if (as.hasTemp) { pageWrite(F("'>")); pageWrite(String(as.tempC,1)); pageWrite(F("°C</span>")); }
+        else            { pageWrite(F("' style='color:var(--muted)'>–°C</span>")); }
+        pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Setpoint:</span>"));
+        pageWrite(F("<span class='pill' id='hvac_sp_A")); pageWrite(String(as.area));
+        if (as.hasSetpt) { pageWrite(F("'>")); pageWrite(String(as.setptC,1)); pageWrite(F("°C</span>")); }
+        else             { pageWrite(F("' style='color:var(--muted)'>–°C</span>")); }
+        pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Mode:</span>"));
+        pageWrite(F("<span class='pill' id='hvac_mode_A")); pageWrite(String(as.area));
+        pageWrite(F("'>"));
+        if (as.hvac && as.hvac->currentMode[0]) pageWrite(String(as.hvac->currentMode));
+        else pageWrite(F("–"));
+        pageWrite(F("</span>"));
+      pageWrite(F("</div>"));
+
+      if (as.hvac) {
+        // ── Modes + Fan side by side ─────────────────────────────────────────
+        pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:24px;margin-top:8px;align-items:flex-start'>"));
+
+        // Left: HVAC Modes
+        pageWrite(F("<div>"));
+        pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>HVAC Modes (name → preset)</div>"));
+        for (uint8_t mi = 0; mi < DynetEntities::MAX_HVAC_MODES; mi++) {
+          const DynetEntities::HvacModeEntry& me = as.hvac->modes[mi];
+          if (!me.used) continue;
+          pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
+            pageWrite(F("<input class='in' id='hvm_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+            pageWrite(F("' type='text' maxlength='23' placeholder='Mode name' value='"));
+            pageWrite(me.name[0] ? safeAttr(me.name, sizeof(me.name)) : "");
+            pageWrite(F("' style='width:120px;padding:3px 6px'>"));
+            pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
+            pageWrite(F("<input class='in' id='hvm_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+            pageWrite(F("' type='number' min='1' max='255' value='"));
+            pageWrite(String(me.preset1));
+            pageWrite(F("' style='width:56px;padding:3px 5px'>"));
+            pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacMode("));
+            pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10003;</button>"));
+            pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacMode("));
+            pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10006;</button>"));
+          pageWrite(F("</div>"));
+        }
+        pageWrite(F("</div>")); // end modes column
+
+        // Right: Fan Modes
+        if (as.hvac->fanCount > 0) {
+          pageWrite(F("<div>"));
+          pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>Fan Modes (name → preset)</div>"));
+          for (uint8_t fi = 0; fi < DynetEntities::MAX_HVAC_FANMODES; fi++) {
+            const DynetEntities::HvacModeEntry& fe = as.hvac->fanModes[fi];
+            if (!fe.used) continue;
+            pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
+              pageWrite(F("<input class='in' id='hvf_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+              pageWrite(F("' type='text' maxlength='23' placeholder='Fan mode name' value='"));
+              pageWrite(fe.name[0] ? safeAttr(fe.name, sizeof(fe.name)) : "");
+              pageWrite(F("' style='width:120px;padding:3px 6px'>"));
+              pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
+              pageWrite(F("<input class='in' id='hvf_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+              pageWrite(F("' type='number' min='1' max='255' value='"));
+              pageWrite(String(fe.preset1));
+              pageWrite(F("' style='width:56px;padding:3px 5px'>"));
+              pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacFan("));
+              pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10003;</button>"));
+              pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacFan("));
+              pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10006;</button>"));
+            pageWrite(F("</div>"));
+          }
+          pageWrite(F("</div>")); // end fan column
+        }
+
+        pageWrite(F("</div>")); // end flex row
+      }
+    } // end HVAC
+
   pageWrite(F("</div>"));   // area card
   }
 
@@ -556,36 +625,23 @@ void handleRootGet() {
         ".then(r=>r.json()).then(j=>{s.textContent=j.ok?'Sent ✓':'Failed';})"
         ".catch(()=>{s.textContent='Error';});"
     "}"
-    // --- Live UI updater for Preset/Temp/Setpoint pills
+    // --- Live UI updater for Preset pill + HVAC card elements
     "function updAreas(list){"
       "if(!Array.isArray(list)) return;"
       "for(const a of list){"
         "const id=String(a.area);"
-        // preset (+1, unknown=255)
+        // preset pill (+1, unknown=255)
         "const p=document.getElementById('preset_A'+id);"
         "if(p && typeof a.preset0!=='undefined'){"
           "p.textContent='P:\u00a0'+(a.preset0===255?'?':(a.preset0+1));"
         "}"
-        // temperature
-        "const t=document.getElementById('temp_A'+id);"
-        "if(t){"
-          "if(a.hasTemp && typeof a.tempC==='number'){"
-            "t.style.display='';"
-            "t.textContent=a.tempC.toFixed(1)+'°C';"
-          "}else{"
-            "t.style.display='none';"
-          "}"
-        "}"
-        // setpoint
-        "const s=document.getElementById('setpt_A'+id);"
-        "if(s){"
-          "if(a.hasSetpt && typeof a.setptC==='number'){"
-            "s.style.display='';"
-            "s.textContent='SP:'+a.setptC.toFixed(1)+'°C';"
-          "}else{"
-            "s.style.display='none';"
-          "}"
-        "}"
+        // HVAC live elements
+        "const ht=document.getElementById('hvac_temp_A'+id);"
+        "if(ht)ht.textContent=(a.hasTemp && typeof a.tempC==='number')?a.tempC.toFixed(1)+'°C':'–°C';"
+        "const hs=document.getElementById('hvac_sp_A'+id);"
+        "if(hs)hs.textContent=(a.hasSetpt && typeof a.setptC==='number')?a.setptC.toFixed(1)+'°C':'–°C';"
+        "const hm=document.getElementById('hvac_mode_A'+id);"
+        "if(hm && a.hvacMode)hm.textContent=a.hvacMode;"
       "}"
     "}"
     "function pollAreas(){"
@@ -594,27 +650,37 @@ void handleRootGet() {
         ".then(j=>updAreas(j.areas))"
         ".catch(()=>{});"
     "}"
-    // ---- preset buttons ----
-    "var gPC="));
-  pageWrite(String(cfg.ha_preset_count ? cfg.ha_preset_count : 4));
-  pageWrite(F(";"
-    "function applyPC(){"
-      "document.querySelectorAll('.pb').forEach(function(b){"
-        "b.style.display=(parseInt(b.dataset.p)<=gPC)?'':'none';"
+    // ---- preset buttons (per-area counts) ----
+    "var aPC={"));
+  // Embed per-area preset counts as a JS object literal
+  for (int _i = 0; _i < DynetEntities::em.areasCount(); _i++) {
+    const auto& _a = DynetEntities::em.areaAt(_i);
+    if (!_a.present) continue;
+    uint8_t _pc = _a.presetCount ? _a.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
+    pageWrite(String(_a.area) + ":" + _pc + ",");
+  }
+  pageWrite(F("};"
+    "function applyPC(area){"
+      "var pc=aPC[area]||4;"
+      "document.querySelectorAll('.pb[data-area=\"'+area+'\"]').forEach(function(b){"
+        "b.style.display=(parseInt(b.dataset.p)<=pc)?'':'none';"
       "});"
-      "document.querySelectorAll('.pcSel').forEach(function(s){s.value=String(gPC);});"
-      "document.querySelectorAll('.curtainPresetSel').forEach(function(s){"
+      "document.querySelectorAll('.pcSel[data-area=\"'+area+'\"]').forEach(function(s){s.value=String(pc);});"
+      "document.querySelectorAll('.curtainPresetSel[data-area=\"'+area+'\"]').forEach(function(s){"
         "var cur=parseInt(s.value)||1;"
         "var html='';"
-        "for(var p=1;p<=gPC;p++)html+='<option value=\"'+p+'\"'+(p===cur?' selected':'')+'>P'+p+'</option>';"
+        "for(var p=1;p<=pc;p++)html+='<option value=\"'+p+'\"'+(p===cur?' selected':'')+'>P'+p+'</option>';"
         "s.innerHTML=html;"
-        "if(cur>gPC)s.value=String(gPC);"
+        "if(cur>pc)s.value=String(pc);"
       "});"
     "}"
-    "function setPC(n){"
-      "gPC=parseInt(n);"
-      "applyPC();"
-      "fetch('/api/set_preset_count',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'n='+gPC}).catch(function(){});"
+    "function applyAllPC(){"
+      "Object.keys(aPC).forEach(function(a){applyPC(parseInt(a));});"
+    "}"
+    "function setPC(area,n){"
+      "aPC[area]=parseInt(n);"
+      "applyPC(area);"
+      "fetch('/api/set_preset_count',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area+'&n='+n}).catch(function(){});"
     "}"
     "function sendPreset(a,p){"
       "fetch('/api/area_preset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+a+'&preset='+p+'&fade=0'});"
@@ -622,7 +688,7 @@ void handleRootGet() {
     "window.addEventListener('DOMContentLoaded',()=>{"
       "setInterval(pollAreas,1500);"
       "pollAreas();"
-      "applyPC();"
+      "applyAllPC();"
     "});"
     // ---- manual add/delete helpers ----
     "function apiPost(url,body){"
@@ -682,6 +748,40 @@ void handleRootGet() {
     "function setAreaType(area,t){"
       "fetch('/api/area_type',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area+'&type='+t})"
         ".then(r=>r.json()).then(j=>{if(j.ok)location.reload();else alert('Failed');}).catch(()=>alert('Error'));"
+    "}"
+    "function addHvacMode(area){"
+      "const name=prompt('Mode name (e.g. cool, heat, off):'); if(!name)return;"
+      "const preset=parseInt(prompt('Dynalite preset number for this mode:')); if(!preset)return;"
+      "apiPost('/api/hvac/add_mode','area='+area+'&name='+encodeURIComponent(name)+'&preset='+preset);"
+    "}"
+    "function addHvacFan(area){"
+      "const name=prompt('Fan mode name (e.g. low, medium, high):'); if(!name)return;"
+      "const preset=parseInt(prompt('Dynalite preset number for this fan mode:')); if(!preset)return;"
+      "apiPost('/api/hvac/add_fan','area='+area+'&name='+encodeURIComponent(name)+'&preset='+preset);"
+    "}"
+    "function saveHvacMode(area,idx){"
+      "const n=document.getElementById('hvm_n_'+area+'_'+idx);"
+      "const p=document.getElementById('hvm_p_'+area+'_'+idx);"
+      "if(!n||!p)return;"
+      "fetch('/api/hvac/save_mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+        "body:'area='+area+'&idx='+idx+'&name='+encodeURIComponent(n.value.trim())+'&preset='+p.value})"
+        ".then(r=>r.json()).then(j=>{if(!j.ok)alert('Failed');}).catch(()=>alert('Error'));"
+    "}"
+    "function saveHvacFan(area,idx){"
+      "const n=document.getElementById('hvf_n_'+area+'_'+idx);"
+      "const p=document.getElementById('hvf_p_'+area+'_'+idx);"
+      "if(!n||!p)return;"
+      "fetch('/api/hvac/save_fan',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+        "body:'area='+area+'&idx='+idx+'&name='+encodeURIComponent(n.value.trim())+'&preset='+p.value})"
+        ".then(r=>r.json()).then(j=>{if(!j.ok)alert('Failed');}).catch(()=>alert('Error'));"
+    "}"
+    "function delHvacMode(area,idx){"
+      "if(!confirm('Delete this HVAC mode?'))return;"
+      "apiPost('/api/hvac/del_mode','area='+area+'&idx='+idx);"
+    "}"
+    "function delHvacFan(area,idx){"
+      "if(!confirm('Delete this fan mode?'))return;"
+      "apiPost('/api/hvac/del_fan','area='+area+'&idx='+idx);"
     "}"
     "function addAreaCurtain(area){"
       "fetch('/api/add_area_curtain',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area})"
@@ -2000,6 +2100,8 @@ server.on("/areas_status", HTTP_GET, [](){
     if (as.hasTemp && !isnan(as.tempC))   o["tempC"]  = as.tempC;
     o["hasSetpt"] = as.hasSetpt;
     if (as.hasSetpt && !isnan(as.setptC)) o["setptC"] = as.setptC;
+    if (as.areaType == DynetEntities::AREA_HVAC && as.hvac && as.hvac->currentMode[0])
+      o["hvacMode"] = as.hvac->currentMode;
   }
   String out; serializeJson(d, out);
   server.sendHeader("Cache-Control","no-store");
@@ -2017,17 +2119,17 @@ server.on("/areas_status", HTTP_GET, [](){
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
-  // Update preset count — saves to config and republishes HA discovery for all areas
+  // Update preset count — per-area, saves to entities and republishes HA discovery for that area
   server.on("/api/set_preset_count", HTTP_POST, [](){
     using namespace DynetEntities;
-    if (!server.hasArg("n")) { server.send(400, "application/json", "{\"ok\":false}"); return; }
-    uint8_t n = (uint8_t)constrain(server.arg("n").toInt(), 1, 128);
-    cfg.ha_preset_count = n;
-    saveConfig();
-    // Republish HA discovery for every known area so the select options update
-    for (int i = 0; i < em.areasCount(); i++) {
-      if (em.areaAt(i).present) publishHADiscoveryForArea(em.areaAt(i).area);
-    }
+    if (!server.hasArg("n") || !server.hasArg("area")) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    uint8_t n    = (uint8_t)constrain(server.arg("n").toInt(), 1, 128);
+    int ai = em.findArea(area);
+    if (ai < 0) { server.send(404, "application/json", "{\"ok\":false,\"error\":\"area not found\"}"); return; }
+    em.areaAtMut(ai).presetCount = n;
+    saveEntities();
+    publishHADiscoveryForArea(area);  // republish only this area's preset select
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -2113,6 +2215,79 @@ server.on("/areas_status", HTTP_GET, [](){
     uint8_t area = (uint8_t)server.arg("area").toInt();
     bool ok = em.deleteArea(area);
     server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"not found\"}");
+  });
+
+  // ---- HVAC mode/fan management ----
+  server.on("/api/hvac/add_mode", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")||!server.hasArg("name")||!server.hasArg("preset")){server.send(400,"application/json","{\"ok\":false}");return;}
+    uint8_t area   = (uint8_t)server.arg("area").toInt();
+    uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    String  name   = server.arg("name");
+    int idx = em.addHvacMode(area, name.c_str(), preset);
+    server.send(200,"application/json", idx>=0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"full or wrong type\"}");
+  });
+
+  server.on("/api/hvac/add_fan", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")||!server.hasArg("name")||!server.hasArg("preset")){server.send(400,"application/json","{\"ok\":false}");return;}
+    uint8_t area   = (uint8_t)server.arg("area").toInt();
+    uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    String  name   = server.arg("name");
+    int idx = em.addHvacFanMode(area, name.c_str(), preset);
+    server.send(200,"application/json", idx>=0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"full or wrong type\"}");
+  });
+
+  server.on("/api/hvac/del_mode", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")||!server.hasArg("idx")){server.send(400,"application/json","{\"ok\":false}");return;}
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    uint8_t idx  = (uint8_t)server.arg("idx").toInt();
+    em.deleteHvacMode(area, idx);
+    server.send(200,"application/json","{\"ok\":true}");
+  });
+
+  server.on("/api/hvac/del_fan", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")||!server.hasArg("idx")){server.send(400,"application/json","{\"ok\":false}");return;}
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    uint8_t idx  = (uint8_t)server.arg("idx").toInt();
+    em.deleteHvacFanMode(area, idx);
+    server.send(200,"application/json","{\"ok\":true}");
+  });
+
+  server.on("/api/hvac/save_mode", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")||!server.hasArg("idx")||!server.hasArg("name")||!server.hasArg("preset")){server.send(400,"application/json","{\"ok\":false}");return;}
+    uint8_t area   = (uint8_t)server.arg("area").toInt();
+    uint8_t idx    = (uint8_t)server.arg("idx").toInt();
+    uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    String  name   = server.arg("name");
+    int ai = em.findArea(area);
+    if (ai<0||!em.areaAt(ai).hvac||idx>=MAX_HVAC_MODES||!em.areaAt(ai).hvac->modes[idx].used){server.send(404,"application/json","{\"ok\":false}");return;}
+    em.areaAtMut(ai).hvac->modes[idx].preset1 = preset;
+    strncpy(em.areaAtMut(ai).hvac->modes[idx].name, name.c_str(), sizeof(DynetEntities::HvacModeEntry::name)-1);
+    em.areaAtMut(ai).hvac->modes[idx].name[sizeof(DynetEntities::HvacModeEntry::name)-1] = '\0';
+    publishHADiscoveryForArea(area);
+    saveEntities();
+    server.send(200,"application/json","{\"ok\":true}");
+  });
+
+  server.on("/api/hvac/save_fan", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")||!server.hasArg("idx")||!server.hasArg("name")||!server.hasArg("preset")){server.send(400,"application/json","{\"ok\":false}");return;}
+    uint8_t area   = (uint8_t)server.arg("area").toInt();
+    uint8_t idx    = (uint8_t)server.arg("idx").toInt();
+    uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    String  name   = server.arg("name");
+    int ai = em.findArea(area);
+    if (ai<0||!em.areaAt(ai).hvac||idx>=MAX_HVAC_FANMODES||!em.areaAt(ai).hvac->fanModes[idx].used){server.send(404,"application/json","{\"ok\":false}");return;}
+    em.areaAtMut(ai).hvac->fanModes[idx].preset1 = preset;
+    strncpy(em.areaAtMut(ai).hvac->fanModes[idx].name, name.c_str(), sizeof(DynetEntities::HvacModeEntry::name)-1);
+    em.areaAtMut(ai).hvac->fanModes[idx].name[sizeof(DynetEntities::HvacModeEntry::name)-1] = '\0';
+    publishHADiscoveryForArea(area);
+    saveEntities();
+    server.send(200,"application/json","{\"ok\":true}");
   });
 
   // Area requests

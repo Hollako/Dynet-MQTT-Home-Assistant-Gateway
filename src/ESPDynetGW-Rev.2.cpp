@@ -56,6 +56,7 @@ void setup() {
   mqttSetup();
   mqttEnsureConnected();   // quick initial attempt
 
+  ArduinoOTA.setHostname(deviceId.c_str()); // sets mDNS hostname used by MDNS.begin() inside ArduinoOTA.begin()
   ArduinoOTA.begin();
   ArduinoOTA.handle();
 

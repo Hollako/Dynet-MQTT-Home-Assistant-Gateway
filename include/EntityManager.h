@@ -20,10 +20,29 @@ enum CurtainMove : uint8_t {
   CURTAIN_CLOSING,      // DOWN relay ON, travel timer running
 };
 
-// Area-level type: Lights (default) or virtual Curtain via preset opcodes
+// Area-level type
 enum AreaType : uint8_t {
-  AREA_LIGHTS  = 0,   // normal — channels visible, preset/temp/setpoint entities in HA
-  AREA_CURTAIN = 1,   // virtual curtain — no channel management; sends presets for OPEN/CLOSE/STOP
+  AREA_LIGHTS  = 0,   // normal lighting — channels, preset select in HA
+  AREA_CURTAIN = 1,   // virtual curtain — sends presets for OPEN/CLOSE/STOP
+  AREA_HVAC    = 2,   // climate/thermostat — modes+fan mapped to presets, temp/setpoint via opcodes
+};
+
+// One HVAC operating mode or fan speed mapped to a Dynalite preset
+struct HvacModeEntry {
+  bool    used    = false;
+  char    name[24] = {};  // HA mode name e.g. "off", "cool", "heat", "fan_only"
+  uint8_t preset1 = 1;   // 1-based Dynalite preset
+};
+static constexpr uint8_t MAX_HVAC_MODES    = 8;
+static constexpr uint8_t MAX_HVAC_FANMODES = 6;
+
+struct HvacConfig {
+  HvacModeEntry modes[MAX_HVAC_MODES];
+  HvacModeEntry fanModes[MAX_HVAC_FANMODES];
+  uint8_t       modeCount = 0;
+  uint8_t       fanCount  = 0;
+  char          currentMode[24]    = {};  // last known mode name; "" = unknown
+  char          currentFanMode[24] = {};  // last known fan mode;  "" = unknown
 };
 
 struct ChannelState {
@@ -61,11 +80,13 @@ struct AreaState {
   float    setptC   = NAN;
   uint32_t lastLevelReqMs = 0;   // debounce refresh requests
   char     name[41] = {};   // user label; empty = default "Area N"
+  uint8_t  presetCount = 4; // 1..128, number of presets exposed to HA for this area
   // Area-type / virtual curtains
   AreaType         areaType = AREA_LIGHTS;
   // Allocated on demand when areaType is set to AREA_CURTAIN (nullptr for light areas).
   // Saves ~1440 bytes per area slot vs. embedding the array statically.
   AreaCurtainEntry* curtains = nullptr; // heap-allocated [MAX_CURTAINS_PER_AREA] or nullptr
+  HvacConfig*       hvac     = nullptr; // heap-allocated for HVAC areas, nullptr otherwise
 };
 
 #ifndef DYNET_MAX_CHANNELS
@@ -119,6 +140,14 @@ public:
                            const char* name,
                            uint8_t openP, uint8_t closeP, uint8_t stopP);
   void commandAreaCurtain(uint8_t area, uint8_t curtainIdx, const char* cmd); // "OPEN"/"CLOSE"/"STOP"
+
+  // HVAC area management
+  int  addHvacMode   (uint8_t area, const char* name, uint8_t preset1); // returns idx or -1
+  int  addHvacFanMode(uint8_t area, const char* name, uint8_t preset1);
+  void deleteHvacMode   (uint8_t area, uint8_t idx);
+  void deleteHvacFanMode(uint8_t area, uint8_t idx);
+  void commandHvacMode   (uint8_t area, const char* modeName); // from HA: send preset + publish state
+  void commandHvacFanMode(uint8_t area, const char* fanName);
 
   // Access
   inline int channelsCount() const { return _chCount; }

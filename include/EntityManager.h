@@ -35,6 +35,12 @@ struct HvacModeEntry {
 };
 static constexpr uint8_t MAX_HVAC_MODES    = 8;
 static constexpr uint8_t MAX_HVAC_FANMODES = 6;
+static constexpr uint8_t MAX_LIGHT_PRESETS = 16;  // max presets for AREA_LIGHTS
+
+// Preset name storage for AREA_LIGHTS (heap-allocated on demand)
+struct AreaPresetNames {
+  char n[MAX_LIGHT_PRESETS][24] = {};  // 16 × 24 = 384 bytes, allocated only when a name is set
+};
 
 struct HvacConfig {
   HvacModeEntry modes[MAX_HVAC_MODES];
@@ -86,8 +92,9 @@ struct AreaState {
   AreaType         areaType = AREA_LIGHTS;
   // Allocated on demand when areaType is set to AREA_CURTAIN (nullptr for light areas).
   // Saves ~1440 bytes per area slot vs. embedding the array statically.
-  AreaCurtainEntry* curtains = nullptr; // heap-allocated [MAX_CURTAINS_PER_AREA] or nullptr
-  HvacConfig*       hvac     = nullptr; // heap-allocated for HVAC areas, nullptr otherwise
+  AreaCurtainEntry* curtains  = nullptr; // heap-allocated [MAX_CURTAINS_PER_AREA] or nullptr
+  HvacConfig*       hvac      = nullptr; // heap-allocated for HVAC areas, nullptr otherwise
+  AreaPresetNames*  presets   = nullptr; // heap-allocated preset names for AREA_LIGHTS, nullptr otherwise
 };
 
 #ifndef DYNET_MAX_CHANNELS
@@ -127,6 +134,29 @@ public:
   // Name setters (persists via saveEntities + republishes HA discovery)
   void setChannelName(uint8_t area, uint8_t channel0, const char* name);
   void setAreaName(uint8_t area, const char* name);
+  void setPresetName(uint8_t area, uint8_t preset1, const char* name); // 1-based preset, AREA_LIGHTS only
+
+  // Returns the stored custom name for a 1-based preset, or nullptr if not set
+  const char* getPresetName(uint8_t area, uint8_t preset1) const {
+    int ai = findArea(area);
+    if (ai < 0) return nullptr;
+    const auto& as = _areas[ai];
+    if (!as.presets || preset1 < 1 || preset1 > MAX_LIGHT_PRESETS) return nullptr;
+    return as.presets->n[preset1 - 1][0] ? as.presets->n[preset1 - 1] : nullptr;
+  }
+
+  // Always returns a valid display name — custom if set, else Dynalite defaults or "Preset N"
+  String getPresetDisplayName(uint8_t area, uint8_t preset1) const {
+    const char* custom = getPresetName(area, preset1);
+    if (custom && custom[0]) return String(custom);
+    switch (preset1) {
+      case 1: return F("High");
+      case 2: return F("Medium");
+      case 3: return F("Low");
+      case 4: return F("Off");
+      default: return String(F("Preset ")) + String(preset1);
+    }
+  }
 
   // Channel curtain control (relay-based, paired channels)
   void commandCurtain(uint8_t area, uint8_t ch0, const char* cmd); // "OPEN"/"CLOSE"/"STOP"

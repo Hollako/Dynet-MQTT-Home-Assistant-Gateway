@@ -431,6 +431,21 @@ void EntityManager::setAreaName(uint8_t area, const char* name) {
   saveEntities();
 }
 
+void EntityManager::setPresetName(uint8_t area, uint8_t preset1, const char* name) {
+  int idx = findArea(area);
+  if (idx < 0 || preset1 < 1 || preset1 > MAX_LIGHT_PRESETS) return;
+  auto& as = _areas[idx];
+  // Allocate on first use
+  if (!as.presets) {
+    as.presets = new (std::nothrow) AreaPresetNames{};
+    if (!as.presets) return;
+  }
+  strncpy(as.presets->n[preset1 - 1], name ? name : "", 23);
+  as.presets->n[preset1 - 1][23] = '\0';
+  publishHADiscoveryForArea(area);  // republish preset select with updated names
+  saveEntities();
+}
+
 bool EntityManager::deleteArea(uint8_t area) {
   // Delete all channels belonging to this area
   for (int i = _chCount - 1; i >= 0; i--) {

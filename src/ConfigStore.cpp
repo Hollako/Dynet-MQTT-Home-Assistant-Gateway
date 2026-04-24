@@ -140,6 +140,25 @@ bool loadEntities() {
             em.areaAtMut(ai2).presetCount = pc;
           }
         }
+        // Preset names for AREA_LIGHTS
+        if (v.containsKey("pnames") && v["pnames"].is<JsonArray>()) {
+          int ai2 = em.findArea(area);
+          if (ai2 >= 0) {
+            auto& ar = em.areaAtMut(ai2);
+            if (!ar.presets) ar.presets = new (std::nothrow) DynetEntities::AreaPresetNames{};
+            if (ar.presets) {
+              uint8_t pi = 0;
+              for (JsonVariant pv : v["pnames"].as<JsonArray>()) {
+                if (pi >= DynetEntities::MAX_LIGHT_PRESETS) break;
+                if (pv.is<const char*>() && pv.as<const char*>()[0]) {
+                  strncpy(ar.presets->n[pi], pv.as<const char*>(), 23);
+                  ar.presets->n[pi][23] = '\0';
+                }
+                pi++;
+              }
+            }
+          }
+        }
         // Area type + per-curtain/hvac entries
         if (v.containsKey("at")) {
           int ai2 = em.findArea(area);
@@ -278,6 +297,17 @@ bool saveEntities() {
         co["op"] = ce.openPreset;
         co["cl"] = ce.closePreset;
         co["st"] = ce.stopPreset;
+      }
+    }
+    // Preset names (AREA_LIGHTS only)
+    if (a.areaType == DynetEntities::AREA_LIGHTS && a.presets) {
+      bool anyName = false;
+      for (uint8_t p = 0; p < DynetEntities::MAX_LIGHT_PRESETS; p++)
+        if (a.presets->n[p][0]) { anyName = true; break; }
+      if (anyName) {
+        JsonArray pArr = o.createNestedArray("pnames");
+        for (uint8_t p = 0; p < DynetEntities::MAX_LIGHT_PRESETS; p++)
+          pArr.add(a.presets->n[p][0] ? a.presets->n[p] : "");
       }
     }
     if (a.areaType == DynetEntities::AREA_HVAC && a.hvac) {

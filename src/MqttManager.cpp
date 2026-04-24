@@ -195,8 +195,13 @@ static void publishHADiscovery_PresetSelect(uint8_t area) {
   uint8_t pCount = (ai_ps >= 0 && DynetEntities::em.areaAt(ai_ps).presetCount)
                    ? DynetEntities::em.areaAt(ai_ps).presetCount
                    : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
-  if (pCount > 128) pCount = 128;
-  for (int p = 1; p <= pCount; ++p) opts.add(String(p));
+  // Light areas are capped at MAX_LIGHT_PRESETS
+  bool isLight = (ai_ps >= 0 && DynetEntities::em.areaAt(ai_ps).areaType == DynetEntities::AREA_LIGHTS);
+  if (isLight && pCount > DynetEntities::MAX_LIGHT_PRESETS) pCount = DynetEntities::MAX_LIGHT_PRESETS;
+  if (!isLight && pCount > 128) pCount = 128;
+  // Build options: use preset display name (custom or Dynalite default)
+  for (int p = 1; p <= pCount; ++p)
+    opts.add(DynetEntities::em.getPresetDisplayName(area, (uint8_t)p));
 
   addHadeviceBlockForArea(doc, area);
   String payload; serializeJson(doc, payload);
@@ -590,7 +595,7 @@ void publishPresetForArea(uint8_t area) {
 
   String topic = areaBaseTopic(area) + "/preset";
   if (as.preset0 != 0xFF) {
-    String s = String((int)as.preset0 + 1); // 1-based
+    String s = em.getPresetDisplayName(area, (uint8_t)(as.preset0 + 1));
     mqtt.publish(topic.c_str(), s.c_str(), true);
   } else {
     mqtt.publish(topic.c_str(), "unknown", true);
@@ -708,10 +713,34 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  // Select preset for Area (HA sends 1..16; DyNet uses 0-origin internally on wire)
+  // Select preset for Area — HA sends the option string (named or "Preset N")
   if (afterArea == "preset/set") {
-    int preset = msg.toInt();
-    if (preset >= 1 && preset <= 16) {
+    int preset = msg.toInt();  // works for plain numeric strings
+    if (preset == 0) {
+      // Try name reverse-lookup or "Preset N" format
+      using namespace DynetEntities;
+      int ai_cmd = em.findArea((uint8_t)area);
+      if (ai_cmd >= 0) {
+        const auto& as_cmd = em.areaAt(ai_cmd);
+        // Check named presets
+        if (as_cmd.presets) {
+          for (int p = 0; p < MAX_LIGHT_PRESETS; p++) {
+            if (as_cmd.presets->n[p][0] && msg == as_cmd.presets->n[p]) {
+              preset = p + 1; break;
+            }
+          }
+        }
+        // Check Dynalite defaults and "Preset N" format
+        if (preset == 0) {
+          if      (msg == "High")   preset = 1;
+          else if (msg == "Medium") preset = 2;
+          else if (msg == "Low")    preset = 3;
+          else if (msg == "Off")    preset = 4;
+          else if (msg.startsWith("Preset ")) preset = msg.substring(7).toInt();
+        }
+      }
+    }
+    if (preset >= 1 && preset <= 128) {
       dynet.sendAreaPreset((uint8_t)area, (uint8_t)preset, 0);
       dynet.sendRequestPreset((uint8_t)area);            // immediate — single write, no blocking
       dynet.scheduleAreaLevelReqs((uint8_t)area, 500);  // non-blocking level refresh

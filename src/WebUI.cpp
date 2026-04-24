@@ -387,9 +387,9 @@ void handleRootGet() {
     // ── Area action row: preset buttons + count selector + utility buttons ──
     pageWrite(F("<div class='row' style='margin-top:5px;flex-wrap:wrap;gap:5px;align-items:center'>"));
 
-      // Preset buttons P1..Pn (visibility controlled by JS via class 'pb' + data-area + data-p)
+      // Preset buttons P1..P16 (visibility controlled by JS via class 'pb' + data-area + data-p)
       {
-        for (int p = 1; p <= 128; p++) {
+        for (int p = 1; p <= DynetEntities::MAX_LIGHT_PRESETS; p++) {
           pageWrite(F("<button class='btn action pb' data-area='"));
           pageWrite(String(as.area));
           pageWrite(F("' data-p='"));
@@ -400,16 +400,17 @@ void handleRootGet() {
         }
       }
 
-      // Preset count dropdown — per area, pre-selected to this area's count
+      // Preset count dropdown — capped at MAX_LIGHT_PRESETS for light areas
       {
         uint8_t thisPc = as.presetCount ? as.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
+        if (thisPc > DynetEntities::MAX_LIGHT_PRESETS) thisPc = DynetEntities::MAX_LIGHT_PRESETS;
         pageWrite(F("<select class='pcSel in' data-area='"));
         pageWrite(String(as.area));
         pageWrite(F("' onchange='setPC("));
         pageWrite(String(as.area));
         pageWrite(F(",this.value)' title='Number of presets shown'"
                     " style='padding:2px 4px;min-width:auto;width:auto;font-size:12px'>"));
-        for (int n = 1; n <= 128; n++) {
+        for (int n = 1; n <= DynetEntities::MAX_LIGHT_PRESETS; n++) {
           if (n == thisPc) pageWrite(String("<option value='") + n + "' selected>" + n + "</option>");
           else             pageWrite(String("<option value='") + n + "'>" + n + "</option>");
         }
@@ -429,6 +430,38 @@ void handleRootGet() {
       pageWrite(String(as.area)); pageWrite(F("&do=req_levels'})\">Req Levels</button>"));
 
     pageWrite(F("</div>")); // action row
+
+    // ── Preset name editor ────────────────────────────────────────────────
+    {
+      uint8_t thisPc = as.presetCount ? as.presetCount : 4;
+      if (thisPc > DynetEntities::MAX_LIGHT_PRESETS) thisPc = DynetEntities::MAX_LIGHT_PRESETS;
+      pageWrite(F("<div style='margin-top:6px;border:1px solid var(--border);border-radius:8px;padding:8px'>"));
+      pageWrite(F("<div style='font-size:12px;color:var(--muted);font-weight:600;margin-bottom:6px'>Preset Names</div>"));
+      pageWrite(F("<div id='pnGrid_A")); pageWrite(String(as.area));
+      pageWrite(F("' style='display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px'>"));
+      for (int p = 1; p <= DynetEntities::MAX_LIGHT_PRESETS; p++) {
+        // Always show a display name — custom or Dynalite default
+        String nm = em.getPresetDisplayName((uint8_t)as.area, (uint8_t)p);
+        pageWrite(F("<div class='pnRow' data-area='"));
+        pageWrite(String(as.area)); pageWrite(F("' data-p='")); pageWrite(String(p));
+        pageWrite(F("' style='display:"));
+        pageWrite(p <= thisPc ? F("flex") : F("none"));
+        pageWrite(F(";align-items:center;gap:3px'>"));
+          pageWrite(F("<span style='font-size:12px;min-width:22px;color:var(--muted)'>P"));
+          pageWrite(String(p)); pageWrite(F("</span>"));
+          pageWrite(F("<input id='pn_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(p));
+          pageWrite(F("' type='text' maxlength='23' value='"));
+          pageWrite(safeAttr(nm.c_str(), nm.length()));
+          pageWrite(F("' style='flex:1;padding:3px 5px;font-size:12px;min-width:0'>"));
+          pageWrite(F("<button class='btn' style='padding:2px 7px;min-width:auto;min-height:auto;font-size:12px' onclick='savePresetName("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(p));
+          pageWrite(F(",\"pn_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(p));
+          pageWrite(F("\")'>&#10003;</button>"));
+        pageWrite(F("</div>")); // pnRow
+      }
+      pageWrite(F("</div>")); // pnGrid
+      pageWrite(F("</div>")); // preset name editor card
+    }
 
     // ── Channel cards — sorted by channel number ──────────────────────────
     pageWrite(F("<div style='margin-top:8px;padding-top:6px' class='grid2'>"));
@@ -671,6 +704,14 @@ void handleRootGet() {
         ".then(j=>updAreas(j.areas))"
         ".catch(()=>{});"
     "}"
+    // ---- area type map (0=LIGHTS,1=CURTAIN,2=HVAC) ----
+    "var aType={"));
+  for (int _i = 0; _i < DynetEntities::em.areasCount(); _i++) {
+    const auto& _a = DynetEntities::em.areaAt(_i);
+    if (!_a.present) continue;
+    pageWrite(String(_a.area) + ":" + (uint8_t)_a.areaType + ",");
+  }
+  pageWrite(F("};"
     // ---- preset buttons (per-area counts) ----
     "var aPC={"));
   // Embed per-area preset counts as a JS object literal
@@ -694,14 +735,28 @@ void handleRootGet() {
         "s.innerHTML=html;"
         "if(cur>pc)s.value=String(pc);"
       "});"
+      // Show/hide preset name rows for AREA_LIGHTS
+      "document.querySelectorAll('.pnRow[data-area=\"'+area+'\"]').forEach(function(r){"
+        "r.style.display=(parseInt(r.dataset.p)<=pc)?'flex':'none';"
+      "});"
     "}"
     "function applyAllPC(){"
       "Object.keys(aPC).forEach(function(a){applyPC(parseInt(a));});"
     "}"
     "function setPC(area,n){"
-      "aPC[area]=parseInt(n);"
+      "n=parseInt(n);"
+      // Cap at 16 for light areas
+      "if((aType[area]||0)===0 && n>16)n=16;"
+      "aPC[area]=n;"
       "applyPC(area);"
       "fetch('/api/set_preset_count',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area+'&n='+n}).catch(function(){});"
+    "}"
+    "function savePresetName(area,preset,inputId){"
+      "var v=document.getElementById(inputId);"
+      "if(!v)return;"
+      "fetch('/api/set_preset_name',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+        "body:'area='+area+'&preset='+preset+'&name='+encodeURIComponent(v.value.trim())})"
+      ".then(r=>r.json()).then(j=>{if(!j.ok)alert(j.error||'Failed');}).catch(()=>{});"
     "}"
     "function sendPreset(a,p){"
       "fetch('/api/area_preset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+a+'&preset='+p+'&fade=0'});"
@@ -2158,12 +2213,31 @@ server.on("/areas_status", HTTP_GET, [](){
     using namespace DynetEntities;
     if (!server.hasArg("n") || !server.hasArg("area")) { server.send(400, "application/json", "{\"ok\":false}"); return; }
     uint8_t area = (uint8_t)server.arg("area").toInt();
-    uint8_t n    = (uint8_t)constrain(server.arg("n").toInt(), 1, 128);
+    int     nRaw = server.arg("n").toInt();
     int ai = em.findArea(area);
     if (ai < 0) { server.send(404, "application/json", "{\"ok\":false,\"error\":\"area not found\"}"); return; }
+    // Enforce cap for light areas
+    int maxN = (em.areaAt(ai).areaType == AREA_LIGHTS) ? MAX_LIGHT_PRESETS : 128;
+    uint8_t n = (uint8_t)constrain(nRaw, 1, maxN);
     em.areaAtMut(ai).presetCount = n;
     saveEntities();
     publishHADiscoveryForArea(area);  // republish only this area's preset select
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Set preset name for a light area
+  server.on("/api/set_preset_name", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area") || !server.hasArg("preset") || !server.hasArg("name")) {
+      server.send(400, "application/json", "{\"ok\":false}"); return;
+    }
+    uint8_t area   = (uint8_t)server.arg("area").toInt();
+    uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    String  name   = server.arg("name");
+    if (preset < 1 || preset > MAX_LIGHT_PRESETS) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"preset out of range\"}"); return;
+    }
+    em.setPresetName(area, preset, name.c_str());
     server.send(200, "application/json", "{\"ok\":true}");
   });
 

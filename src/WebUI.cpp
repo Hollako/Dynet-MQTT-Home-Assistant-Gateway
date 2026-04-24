@@ -76,7 +76,7 @@ static inline void pageBegin(const String& title) {
       ".status{display:flex;gap:12px;align-items:center;margin:10px 0;flex-wrap:wrap}"
       ".badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:999px;background:var(--card);border:1px solid var(--border)}"
       ".dot{width:8px;height:8px;border-radius:50%;background:#bbb}"
-      ".ok .dot{background:#19c37d}.err .dot{background:#ef4444}.inactive .dot{background:#aaa}"
+      ".ok .dot{background:#19c37d}.warn .dot{background:#f59e0b}.err .dot{background:#ef4444}.inactive .dot{background:#aaa}"
       ".form{display:block}"
       ".form-table{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px 14px;align-items:center}"
       "@media(max-width:640px){.form-table{grid-template-columns:120px minmax(0,1fr)}}"
@@ -101,6 +101,10 @@ static inline void pageBegin(const String& title) {
         "const staUp = !!(b.sta_ip && b.sta_ip.length);"
         "if(sb){sb.classList.toggle('ok', staUp); sb.classList.toggle('err', !staUp);} "
         "if(st) st.textContent = staUp ? ('IP: '+(b.sta_ip||'')) : 'No IP';"
+        "const ws=document.getElementById('wifiSig');"
+        "if(ws){ws.classList.remove('ok','warn','err','inactive'); ws.classList.add(b.rssi_pct>50?'ok':b.rssi_pct>20?'warn':'err');} "
+        "const wt=ws?.querySelector('span:last-child');"
+        "if(wt) wt.textContent = 'WiFi: '+(b.rssi_pct||0)+'%';"
         "const a=document.getElementById('apText');"
         "if(a) a.textContent = b.ap_active ? ('AP: '+(b.ap_ssid||'')) : 'AP: Off';"
       "}"
@@ -113,7 +117,11 @@ static inline void pageBegin(const String& title) {
   );
 
   // nav
-  server.sendContent(F("<div class='nav'><strong>ESP DyNet Gateway - "));
+  server.sendContent(
+    F("<div class='nav'>"
+      "<img src='/logo.png' alt='Logo' style='height:52px;width:auto;object-fit:contain;margin-right:10px' "
+           "onerror='this.style.display=\"none\"'>"
+      "<strong>ESP DyNet Gateway - "));
   server.sendContent(deviceId);
   server.sendContent(
     F("</strong><div class='sp'></div>"
@@ -131,6 +139,7 @@ static inline void pageBegin(const String& title) {
   server.sendContent(
     F("<div class='status'>"
       "<div id='staBadge'  class='badge'><span class='dot'></span><span id='staText'>IP…</span></div>"
+      "<div id='wifiSig'   class='badge inactive'><span class='dot'></span><span>WiFi…</span></div>"
       "<div id='mqttBadge' class='badge'><span class='dot'></span><span id='mqttText'>MQTT…</span></div>"
       "<div class='badge inactive'><span class='dot'></span><span id='apText'>AP…</span></div>"
       "<div style='margin-left:auto'></div>"
@@ -540,6 +549,18 @@ void handleRootGet() {
       pageWrite(F("</div>"));
 
       if (as.hvac) {
+        // ── Setpoint step selector ────────────────────────────────────────────
+        pageWrite(F("<div class='row' style='margin-top:8px;gap:8px;align-items:center'>"));
+          pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Setpoint Step:</span>"));
+          pageWrite(F("<select class='in' style='width:90px;padding:3px 6px' onchange=\"setHvacStep("));
+          pageWrite(String(as.area));
+          pageWrite(F(",this.value)\">"));
+          float curStep = as.hvac->setptStep;
+          pageWrite(F("<option value='0.5'"));  if (curStep < 1.0f) pageWrite(F(" selected")); pageWrite(F(">0.5 °C</option>"));
+          pageWrite(F("<option value='1.0'"));  if (curStep >= 1.0f) pageWrite(F(" selected")); pageWrite(F(">1 °C</option>"));
+          pageWrite(F("</select>"));
+        pageWrite(F("</div>"));
+
         // ── Modes + Fan side by side ─────────────────────────────────────────
         pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:24px;margin-top:8px;align-items:flex-start'>"));
 
@@ -782,6 +803,10 @@ void handleRootGet() {
     "function delHvacFan(area,idx){"
       "if(!confirm('Delete this fan mode?'))return;"
       "apiPost('/api/hvac/del_fan','area='+area+'&idx='+idx);"
+    "}"
+    "function setHvacStep(area,step){"
+      "fetch('/api/hvac/set_step',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area+'&step='+step})"
+        ".then(r=>r.json()).then(j=>{if(!j.ok)alert('Failed');}).catch(()=>alert('Error'));"
     "}"
     "function addAreaCurtain(area){"
       "fetch('/api/add_area_curtain',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area})"
@@ -2039,6 +2064,15 @@ void registerWebRoutes() {
   server.on("/config",  HTTP_POST, handleConfigPost);
   server.on("/reboot", HTTP_GET, [](){ sendRebootingPage("Reboot requested","",10,2000); scheduleReboot(800); });
 
+  // Serve company logo from LittleFS (place PNG at data/logo.png and upload filesystem)
+  server.on("/logo.png", HTTP_GET, [](){
+    if (!LittleFS.exists("/logo.png")) { server.send(404); return; }
+    File f = LittleFS.open("/logo.png", "r");
+    server.sendHeader("Cache-Control", "no-store");
+    server.streamFile(f, "image/png");
+    f.close();
+  });
+
   // Channel command API
   server.on("/api/cmd", HTTP_POST, [](){
     if (!server.hasArg("area") || !server.hasArg("ch") || !server.hasArg("cmd")) { server.send(400, "application/json", "{\"ok\":false}"); return; }
@@ -2113,9 +2147,9 @@ server.on("/areas_status", HTTP_GET, [](){
     areasSweepActive  = true;
     areasSweepArea    = 2;          // start from Area 2
     areasSweepChannel = 0;
-    areasSweepPass    = 2;          // 3 total passes (2 extra after first)
+    areasSweepPass    = 0;          // 1 pass only — user can press again if needed
     areasSweepNextAt  = millis() + 50;
-    LOGF("[DyNet] sweep START (3 passes) requested from WebUI\n");
+    LOGF("[DyNet] sweep START (1 pass) requested from WebUI\n");
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -2290,6 +2324,21 @@ server.on("/areas_status", HTTP_GET, [](){
     server.send(200,"application/json","{\"ok\":true}");
   });
 
+  // HVAC setpoint step (0.5 or 1.0 °C)
+  server.on("/api/hvac/set_step", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area") || !server.hasArg("step")) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    float   step = server.arg("step").toFloat();
+    step = (step >= 1.0f) ? 1.0f : 0.5f;   // only two valid values
+    int ai = em.findArea(area);
+    if (ai < 0 || !em.areaAt(ai).hvac) { server.send(404, "application/json", "{\"ok\":false}"); return; }
+    em.areaAtMut(ai).hvac->setptStep = step;
+    saveEntities();
+    publishHADiscoveryForArea(area);   // re-publish climate entity with new temp_step
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
   // Area requests
   server.on("/api/area_req", HTTP_POST, [](){
     if (!server.hasArg("area") || !server.hasArg("do")) { server.send(400, "application/json", "{\"ok\":false}"); return; }
@@ -2436,7 +2485,10 @@ server.on("/areas_status", HTTP_GET, [](){
     if (staUp) {
       doc["sta_ip"]   = WiFi.localIP().toString();
       doc["sta_ssid"] = WiFi.SSID();
-    } else { doc["sta_ip"] = ""; doc["sta_ssid"] = ""; }
+      int rssi = (int)WiFi.RSSI();
+      doc["rssi"]     = rssi;
+      doc["rssi_pct"] = constrain(2 * (rssi + 100), 0, 100);
+    } else { doc["sta_ip"] = ""; doc["sta_ssid"] = ""; doc["rssi"] = 0; doc["rssi_pct"] = 0; }
     doc["ap_active"] = apActive;
     doc["ap_ssid"]   = apSsid;
     server.sendHeader("Cache-Control","no-store");

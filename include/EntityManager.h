@@ -43,6 +43,7 @@ struct HvacConfig {
   uint8_t       fanCount  = 0;
   char          currentMode[24]    = {};  // last known mode name; "" = unknown
   char          currentFanMode[24] = {};  // last known fan mode;  "" = unknown
+  float         setptStep = 0.5f;         // temperature setpoint step: 0.5 or 1.0 °C
 };
 
 struct ChannelState {

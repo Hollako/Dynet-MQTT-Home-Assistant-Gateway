@@ -178,6 +178,20 @@ bool loadEntities() {
             }
             if (ar.hvac && v.containsKey("hvac")) {
               JsonObject hv = v["hvac"].as<JsonObject>();
+              // Restore setpoint step (0.5 or 1.0)
+              if (hv.containsKey("step")) {
+                float s = (float)(double)hv["step"];
+                ar.hvac->setptStep = (s >= 1.0f) ? 1.0f : 0.5f;
+              }
+              // Restore last-known mode and fan mode
+              if (hv.containsKey("curMode") && hv["curMode"].is<const char*>()) {
+                strncpy(ar.hvac->currentMode, (const char*)hv["curMode"], sizeof(ar.hvac->currentMode) - 1);
+                ar.hvac->currentMode[sizeof(ar.hvac->currentMode) - 1] = '\0';
+              }
+              if (hv.containsKey("curFan") && hv["curFan"].is<const char*>()) {
+                strncpy(ar.hvac->currentFanMode, (const char*)hv["curFan"], sizeof(ar.hvac->currentFanMode) - 1);
+                ar.hvac->currentFanMode[sizeof(ar.hvac->currentFanMode) - 1] = '\0';
+              }
               if (hv.containsKey("modes") && hv["modes"].is<JsonArray>()) {
                 uint8_t mi = 0;
                 for (JsonObject me : hv["modes"].as<JsonArray>()) {
@@ -269,6 +283,9 @@ bool saveEntities() {
     if (a.areaType == DynetEntities::AREA_HVAC && a.hvac) {
       o["at"] = (uint8_t)a.areaType;
       JsonObject hv = o.createNestedObject("hvac");
+      hv["step"] = a.hvac->setptStep;
+      if (a.hvac->currentMode[0])    hv["curMode"] = a.hvac->currentMode;
+      if (a.hvac->currentFanMode[0]) hv["curFan"]  = a.hvac->currentFanMode;
       JsonArray mArr = hv.createNestedArray("modes");
       for (uint8_t mi = 0; mi < DynetEntities::MAX_HVAC_MODES; mi++) {
         const auto& me = a.hvac->modes[mi];

@@ -125,24 +125,6 @@ static void publishHADiscovery_TempSensor(uint8_t area) {
   mqtt.publish(discTopic.c_str(), payload.c_str(), true);
 }
 
-// Setpoint as a Number entity (simple + reliable)
-static void publishHADiscovery_SetpointNumber(uint8_t area) {
-  String sid = mqttSafeId(deviceId);
-  String objId = String("a") + String(area) + "_setpoint";
-  String discTopic = String(HA_DISCOVERY_PREFIX) + "/number/" + sid + "/" + objId + "/config";
-  DynamicJsonDocument doc(512);
-  doc["name"]               = areaDisplayName(area) + " Setpoint";
-  doc["unique_id"]          = sid + "_" + objId;
-  doc["command_topic"]      = areaBaseTopic(area) + "/setpoint/set";
-  doc["state_topic"]        = areaBaseTopic(area) + "/setpoint";
-  doc["min"] = 10.0; doc["max"] = 35.0; doc["step"] = 0.5;
-  doc["unit_of_measurement"] = "°C";
-  doc["availability_topic"] = availabilityTopic();
-  addHadeviceBlockForArea(doc, area);
-  String payload; serializeJson(doc, payload);
-  mqtt.publish(discTopic.c_str(), payload.c_str(), true);
-}
-
 // --- HVAC climate entity ---
 static void publishHADiscovery_Climate(uint8_t area) {
   using namespace DynetEntities;
@@ -168,7 +150,7 @@ static void publishHADiscovery_Climate(uint8_t area) {
   doc["temperature_unit"]          = "C";
   doc["min_temp"] = 10;
   doc["max_temp"] = 35;
-  doc["temp_step"] = 0.5;
+  doc["temp_step"] = h.setptStep;
 
   // Modes
   doc["mode_state_topic"]   = aBase + "/hvac/mode";
@@ -349,6 +331,7 @@ void publishHADiscoveryForArea(uint8_t area) {
   // HVAC area: climate entity only (temp/setpoint handled inside climate)
   if (ai >= 0 && em.areaAt(ai).areaType == AREA_HVAC) {
     publishHADiscovery_Climate(area);
+    publishSensorsForArea(area);   // push current setpoint/temp/mode state so HA shows values immediately
     return;
   }
 
@@ -471,19 +454,19 @@ void publishHADiscovery_Gateway() {
     doc["availability_topic"] = avail;
     pub("sensor", "gw_ip", doc);
   }
-  // 2. RSSI sensor
+  // 2. WiFi signal strength percentage
   {
     DynamicJsonDocument doc(512);
     addHaDeviceBlock_Gateway(doc);
-    doc["name"]               = "Gateway RSSI";
-    doc["unique_id"]          = sid + "_gw_rssi";
+    doc["name"]               = "Gateway WiFi Signal";
+    doc["unique_id"]          = sid + "_gw_rssi_pct";
     doc["state_topic"]        = base + "/state";
-    doc["value_template"]     = "{{ value_json.rssi }}";
-    doc["unit_of_measurement"] = "dBm";
-    doc["device_class"]       = "signal_strength";
+    doc["value_template"]     = "{{ value_json.rssi_pct }}";
+    doc["unit_of_measurement"] = "%";
+    doc["icon"]               = "mdi:wifi";
     doc["entity_category"]    = "diagnostic";
     doc["availability_topic"] = avail;
-    pub("sensor", "gw_rssi", doc);
+    pub("sensor", "gw_rssi_pct", doc);
   }
   // 3. Free heap sensor
   {
@@ -499,15 +482,21 @@ void publishHADiscovery_Gateway() {
     doc["availability_topic"] = avail;
     pub("sensor", "gw_heap", doc);
   }
-  // 4. Uptime sensor
+  // 4. Uptime sensor (formatted as Xd Xh Xm)
   {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(640);
     addHaDeviceBlock_Gateway(doc);
     doc["name"]               = "Gateway Uptime";
     doc["unique_id"]          = sid + "_gw_uptime";
     doc["state_topic"]        = base + "/state";
-    doc["value_template"]     = "{{ value_json.uptime }}";
-    doc["unit_of_measurement"] = "s";
+    doc["value_template"]     =
+      "{% set s=value_json.uptime|int %}"
+      "{% set d=s//86400 %}"
+      "{% set h=(s%86400)//3600 %}"
+      "{% set m=(s%3600)//60 %}"
+      "{% if d>0 %}{{d}}d {{h}}h {{m}}m"
+      "{% elif h>0 %}{{h}}h {{m}}m"
+      "{% else %}{{m}}m{% endif %}";
     doc["icon"]               = "mdi:clock-outline";
     doc["entity_category"]    = "diagnostic";
     doc["availability_topic"] = avail;
@@ -561,10 +550,12 @@ void publishGatewayState() {
   if (!mqtt.connected()) return;
   DynamicJsonDocument doc(256);
   IPAddress ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : WiFi.softAPIP();
-  doc["ip"]     = ip.toString();
-  doc["rssi"]   = (WiFi.status() == WL_CONNECTED) ? (int)WiFi.RSSI() : 0;
-  doc["heap"]   = (uint32_t)ESP.getFreeHeap();
-  doc["uptime"] = (uint32_t)(millis() / 1000UL);
+  int rssi = (WiFi.status() == WL_CONNECTED) ? (int)WiFi.RSSI() : -100;
+  doc["ip"]       = ip.toString();
+  doc["rssi"]     = rssi;
+  doc["rssi_pct"] = constrain(2 * (rssi + 100), 0, 100);
+  doc["heap"]     = (uint32_t)ESP.getFreeHeap();
+  doc["uptime"]   = (uint32_t)(millis() / 1000UL);
   String payload; serializeJson(doc, payload);
   mqtt.publish((gatewayBaseTopic() + "/state").c_str(), payload.c_str(), false);
 }
@@ -672,7 +663,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       areasSweepActive  = true;
       areasSweepArea    = 2;
       areasSweepChannel = 0;
-      areasSweepPass    = 2;
+      areasSweepPass    = 0;          // 1 pass only
       areasSweepNextAt  = millis() + 50;
     } else if (gwCmd == "rediscover") {
       LOGF("[MQTT] gateway rediscover requested\n");

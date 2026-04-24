@@ -171,15 +171,32 @@ void DynetBus::pollAreas() {
   if (areasSweepActive) {
     if ((int32_t)(millis() - areasSweepNextAt) < 0) return;  // not time yet
 
-    const uint8_t maxAreas = (cfg.dynet_max_areas    ? cfg.dynet_max_areas    : (uint8_t)DYNET_MAX_AREAS);
-    const uint8_t maxCh    = (cfg.dynet_max_channels ? cfg.dynet_max_channels : (uint8_t)DYNET_MAX_CHANNELS);
+    // Cap maxAreas the same way EntityManager::begin() does — prevents uint8_t
+    // overflow when cfg.dynet_max_areas >= 255 (254+1 wraps to 0, resetting the
+    // sweep to area 2 and creating an infinite loop).
+    const uint8_t arCap  = (uint8_t)constrain(
+        (int)(cfg.dynet_max_areas ? cfg.dynet_max_areas : DYNET_MAX_AREAS),
+        1, (int)DYNET_MAX_AREAS);
+    const uint8_t maxCh  = (uint8_t)constrain(
+        (int)(cfg.dynet_max_channels ? cfg.dynet_max_channels : DYNET_MAX_CHANNELS),
+        1, (int)DYNET_MAX_CHANNELS);
+
+    // Early exit: all area slots are full — no point probing more area numbers
+    if (DynetEntities::em.areasCount() >= (int)arCap) {
+      areasSweepActive  = false;
+      areasSweepArea    = 2;
+      areasSweepChannel = 0;
+      LOGF("[DyNet] sweep stopped: area capacity full (%d/%d)\n",
+           DynetEntities::em.areasCount(), (int)arCap);
+      return;
+    }
 
     uint8_t a  = areasSweepArea;
     uint8_t ch = areasSweepChannel;
     if (a < 2) { a = 2; areasSweepArea = 2; }
 
     // End of this pass?
-    if (a > maxAreas) {
+    if (a > arCap) {
       if (areasSweepPass > 0) {
         areasSweepPass--;
         areasSweepArea    = 2;

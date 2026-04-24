@@ -589,6 +589,12 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
     if (!_areas[ai].hvac) {
       _areas[ai].hvac = new (std::nothrow) HvacConfig{};
     }
+    // Seed a default setpoint (22 °C) so the climate entity shows a value immediately
+    // without waiting for a Dynalite opcode — persisted on next saveEntities()
+    if (!_areas[ai].hasSetpt || isnan(_areas[ai].setptC)) {
+      _areas[ai].hasSetpt = true;
+      _areas[ai].setptC   = 22.0f;
+    }
     // Hide all channel entities — HVAC areas are controlled via climate entity
     for (int i = 0; i < _chCount; i++) {
       if (_channels[i].area == area && _channels[i].present && !_channels[i].isCurtainSlave) {
@@ -743,6 +749,7 @@ void EntityManager::commandHvacMode(uint8_t area, const char* modeName) {
       strncpy(h.currentMode, modeName, sizeof(h.currentMode) - 1);
       h.currentMode[sizeof(h.currentMode) - 1] = '\0';
       publishSensorsForArea(area);
+      saveEntities();   // persist currentMode so it survives a reboot
       LOGF("[HVAC] A%u mode '%s' -> Preset %u\n", area, modeName, h.modes[i].preset1);
       return;
     }
@@ -760,6 +767,7 @@ void EntityManager::commandHvacFanMode(uint8_t area, const char* fanName) {
       strncpy(h.currentFanMode, fanName, sizeof(h.currentFanMode) - 1);
       h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
       publishSensorsForArea(area);
+      saveEntities();   // persist currentFanMode so it survives a reboot
       LOGF("[HVAC] A%u fan '%s' -> Preset %u\n", area, fanName, h.fanModes[i].preset1);
       return;
     }

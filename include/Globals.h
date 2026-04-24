@@ -108,6 +108,7 @@ struct AppConfig {
   char mqtt_user[32];
   char mqtt_pass[32];
   bool ha_discovery;
+  bool log_web;                // true = buffer logs for the web /logs tab (costs ~2 KB heap)
   // RS-485 / Dynet
   int  uart_no;                // ESP32: 0/1/2 ; ESP8266 ignore
   uint8_t dynet_max_channels;  // 1..DYNET_MAX_CHANNELS

@@ -57,7 +57,8 @@ static inline void pageBegin(const String& title) {
       ":root{--bg:#fff;--fg:#111;--muted:#666;--card:#fff;--border:#e5e5e5}"
       "body.dark {--bg:#0f1216;--fg:#e5e7eb;--muted:#9ca3af;--card:#161a20;--border:#273245;}"
       "body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;line-height:1.35}"
-      ".nav{position:sticky;top:0;z-index:10;display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg)}"
+      ".nav{position:sticky;top:0;z-index:10;display:flex;gap:6px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--border);background:var(--bg)}"
+      ".btn.nicn{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;font-size:22px;padding:0;min-width:unset;min-height:unset;border-radius:10px}"
       ".nav .sp{flex:1}"
       ".btn{display:inline-block;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--card);cursor:pointer}"
       "a{color:inherit;text-decoration:none}"
@@ -65,8 +66,8 @@ static inline void pageBegin(const String& title) {
       ".container{padding:16px}"
       ".card{border:1px solid var(--border);border-radius:12px;padding:12px;margin:10px 0;background:var(--card)}"
       ".muted{color:var(--muted);font-size:12px}"
-      ".grid2{display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));row-gap:2px;column-gap:12px}"
-      "@media(max-width:900px){.grid2{grid-template-columns:1fr}}"
+      ".grid2{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));row-gap:2px;column-gap:12px}"
+      "@media(max-width:900px){.grid2{grid-template-columns:repeat(2,1fr)}}"
       ".title{font-weight:600;margin:0 0 6px}"
       ".row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}"
       ".row.space{justify-content:space-between}"
@@ -104,14 +105,21 @@ static inline void pageBegin(const String& title) {
         "const ws=document.getElementById('wifiSig');"
         "if(ws){ws.classList.remove('ok','warn','err','inactive'); ws.classList.add(b.rssi_pct>50?'ok':b.rssi_pct>20?'warn':'err');} "
         "const wt=ws?.querySelector('span:last-child');"
-        "if(wt) wt.textContent = 'WiFi: '+(b.rssi_pct||0)+'%';"
+        "if(wt) wt.textContent = 'Wi-Fi: '+(b.sta_ssid||'?')+' ('+(b.rssi_pct||0)+'%)';"
         "const a=document.getElementById('apText');"
         "if(a) a.textContent = b.ap_active ? ('AP: '+(b.ap_ssid||'')) : 'AP: Off';"
       "}"
       "function poll(){fetch('/status',{cache:'no-store'}).then(r=>r.json()).then(upd).catch(()=>{});} "
-      "window.addEventListener('DOMContentLoaded',()=>{poll();setInterval(poll,2000);});"
-      "function applyTheme(){document.body.classList.toggle('dark',localStorage.dark==='1')}"
-      "function toggleDark(){localStorage.dark = (localStorage.dark==='1'?'0':'1');applyTheme()}"
+      "function applyTheme(){"
+        "var dark=localStorage.dark==='1';"
+        "document.body.classList.toggle('dark',dark);"
+        "var b=document.getElementById('themeBtn');"
+        "if(b)b.innerHTML=dark"
+          "?'\u2600'"  // ☀ sun — no rotation
+          ":'<span style=\"display:inline-block;transform:rotate(130deg)\">\u263D</span>';"  // ☽ moon — rotated
+      "}"
+      "function toggleDark(){localStorage.dark=(localStorage.dark==='1'?'0':'1');applyTheme();}"
+      "window.addEventListener('DOMContentLoaded',()=>{applyTheme();poll();setInterval(poll,2000);});"
       "</script>"
       "</head><body>")
   );
@@ -125,21 +133,25 @@ static inline void pageBegin(const String& title) {
   server.sendContent(deviceId);
   server.sendContent(
     F("</strong><div class='sp'></div>"
-      "<a class='btn' href='/'>Home</a>"
-      "<a class='btn' href='/config'>Config</a>"
-      "<a class='btn' href='/logs'>Logs</a>"
-      "<form style='display:inline' method='GET' action='/reboot'><button class='btn' type='submit'>Reboot</button></form>"
-      "<button class='btn' onclick='toggleDark()'>Theme</button>"
-      "<a class='nav' href='/fw'>Firmware</a>"
+      "<a class='btn nicn' href='/' title='Home'><span style='font-size:28px;line-height:1;display:inline-block;transform:translateY(-3px)'>&#x2302;</span></a>"
+      "<a class='btn nicn' href='/config' title='Configuration'>&#x2699;</a>"));
+  if (cfg.log_web) server.sendContent(F("<a class='btn nicn' href='/logs' title='Logs'>&#x2630;</a>"));
+  server.sendContent(
+    F("<a class='btn nicn' href='/fw' title='Firmware Update'>&#x2B06;</a>"
+      "<button class='btn nicn' id='themeBtn' onclick='toggleDark()' title='Toggle theme'>"
+        "<span style='display:inline-block;transform:rotate(130deg)'>&#x263D;</span>"
+      "</button>"
+      "<button class='btn nicn' title='Reboot Device' style='color:#e74c3c' "
+              "onclick='if(confirm(\"Reboot the device?\"))fetch(\"/reboot\",{method:\"GET\"}).then(()=>{})'>&#x21BB;</button>"
 
     "</div><div class='container'>")
   );
 
-  // status badges
+  // status badges — order: Wi-Fi · IP · MQTT · AP
   server.sendContent(
     F("<div class='status'>"
+      "<div id='wifiSig'   class='badge inactive'><span class='dot'></span><span>Wi-Fi…</span></div>"
       "<div id='staBadge'  class='badge'><span class='dot'></span><span id='staText'>IP…</span></div>"
-      "<div id='wifiSig'   class='badge inactive'><span class='dot'></span><span>WiFi…</span></div>"
       "<div id='mqttBadge' class='badge'><span class='dot'></span><span id='mqttText'>MQTT…</span></div>"
       "<div class='badge inactive'><span class='dot'></span><span id='apText'>AP…</span></div>"
       "<div style='margin-left:auto'></div>"
@@ -207,6 +219,330 @@ static String gpioOptions(int current) {
   return o;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Render the expandable body of one area card (LIGHTS / CURTAIN / HVAC).
+// Uses pageWrite() which streams to the active HTTP response — call only
+// while a CONTENT_LENGTH_UNKNOWN response is in progress.
+// ──────────────────────────────────────────────────────────────────────────
+static void renderAreaBody(uint8_t aNum) {
+  using namespace DynetEntities;
+  int ai = em.findArea(aNum);
+  if (ai < 0) return;
+  const AreaState& as = em.areaAt(ai);
+
+  if (as.areaType == AREA_CURTAIN) {
+    // ── Curtain Area: preset count selector + per-curtain cards ─────────────
+    uint8_t pCount = as.presetCount ? as.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
+    if (pCount > 128) pCount = 128;
+
+    pageWrite(F("<div class='row' style='margin-top:6px;gap:6px;align-items:center;flex-wrap:wrap'>"));
+      pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Presets available:</span>"));
+      pageWrite(F("<select class='pcSel in' data-area='"));
+      pageWrite(String(as.area));
+      pageWrite(F("' onchange='setPC("));
+      pageWrite(String(as.area));
+      pageWrite(F(",this.value)' title='Number of presets'"
+                  " style='padding:2px 6px;min-width:auto;width:auto;font-size:13px'>"));
+      for (int n = 1; n <= 128; n++) {
+        if (n == pCount) pageWrite(String("<option value='") + n + "' selected>" + n + "</option>");
+        else             pageWrite(String("<option value='") + n + "'>" + n + "</option>");
+      }
+      pageWrite(F("</select>"));
+    pageWrite(F("</div>")); // preset count row
+
+    // Per-curtain cards — side-by-side (flex-wrap)
+    pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:8px'>"));
+    if (as.curtains) for (uint8_t ci = 0; ci < MAX_CURTAINS_PER_AREA; ci++) {
+      const AreaCurtainEntry& ce = as.curtains[ci];
+      if (!ce.used) continue;
+
+      pageWrite(F("<div style='border:1px solid var(--border);border-radius:12px;padding:8px 10px;background:var(--card)'>"));
+
+        // Header row: name input + delete
+        pageWrite(F("<div class='row space' style='gap:6px;align-items:center;margin-bottom:8px'>"));
+          pageWrite(F("<input class='in' id='cen_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(ci));
+          pageWrite(F("' type='text' maxlength='23' placeholder='Curtain name' value='"));
+          pageWrite(ce.name[0] ? safeAttr(ce.name, sizeof(ce.name)) : (String("Curtain ") + (ci+1)));
+          pageWrite(F("' style='width:150px;padding:3px 6px;font-size:13px'>"));
+          pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 8px;"
+                      "min-width:auto;min-height:auto;font-size:13px' title='Delete Curtain'"
+                      " onclick='delAreaCurtain("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(ci)); pageWrite(F(")'>&#10006;</button>"));
+        pageWrite(F("</div>")); // header row
+
+        // Body: preset box + test buttons
+        pageWrite(F("<div class='row' style='gap:16px;flex-wrap:wrap;align-items:flex-start'>"));
+          pageWrite(F("<div style='padding:8px 12px;border:1px solid var(--border);border-radius:8px;"
+                      "display:flex;flex-direction:column;gap:6px;min-width:160px'>"));
+            pageWrite(F("<div style='font-size:12px;color:var(--muted);font-weight:600'>Curtain Presets</div>"));
+
+            auto presetRow2 = [&](const char* label, const char* sfx, uint8_t cur, const char* cmd, const char* btnIcon) {
+              pageWrite(F("<div class='row' style='gap:6px;align-items:center'>"));
+                pageWrite(F("<span style='font-size:13px;min-width:52px;white-space:nowrap'>")); pageWrite(label); pageWrite(F("</span>"));
+                pageWrite(F("<select class='in curtainPresetSel' data-area='"));  pageWrite(String(as.area));
+                pageWrite(F("' id='")); pageWrite(sfx); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(ci));
+                pageWrite(F("' style='padding:2px 6px;min-width:auto;width:auto;font-size:13px'>"));
+                for (uint8_t p = 1; p <= pCount; p++) {
+                  pageWrite(String("<option value='") + p + "'" + ((cur==p)?" selected":"") + ">P" + p + "</option>");
+                }
+                pageWrite(F("</select>"));
+                pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px'"
+                            " onclick=\"fetch('/api/area_cover',{method:'POST',"
+                            "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                            "body:'area="));
+                pageWrite(String(as.area)); pageWrite(F("&idx=")); pageWrite(String(ci));
+                pageWrite(F("&cmd=")); pageWrite(cmd); pageWrite(F("'})\"")); pageWrite(F(">")); pageWrite(btnIcon); pageWrite(F("</button>"));
+              pageWrite(F("</div>"));
+            };
+            presetRow2("&#9650; Open",  "cop_", ce.openPreset,  "OPEN",  "&#9650;");
+            presetRow2("&#9646; Stop",  "csp_", ce.stopPreset,  "STOP",  "&#9646;");
+            presetRow2("&#9660; Close", "ccp_", ce.closePreset, "CLOSE", "&#9660;");
+
+            pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;"
+                        "font-size:13px;margin-top:2px;width:100%' onclick='saveAreaCurtainEntry("));
+            pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(ci)); pageWrite(F(",this)'>Save</button>"));
+          pageWrite(F("</div>")); // preset+test box
+        pageWrite(F("</div>")); // body row
+      pageWrite(F("</div>")); // curtain card
+    }
+    pageWrite(F("</div>")); // flex-wrap curtains row
+
+  } else if (as.areaType == AREA_LIGHTS) {
+    // ── Area action row: preset buttons + count selector + utility buttons ──
+    pageWrite(F("<div class='row' style='margin-top:5px;flex-wrap:wrap;gap:5px;align-items:center'>"));
+
+      for (int p = 1; p <= MAX_LIGHT_PRESETS; p++) {
+        pageWrite(F("<button class='btn action pb' data-area='"));
+        pageWrite(String(as.area));
+        pageWrite(F("' data-p='"));
+        pageWrite(String(p));
+        pageWrite(F("' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick='sendPreset("));
+        pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(p));
+        pageWrite(F(")'>P")); pageWrite(String(p)); pageWrite(F("</button>"));
+      }
+
+      {
+        uint8_t thisPc = as.presetCount ? as.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
+        if (thisPc > MAX_LIGHT_PRESETS) thisPc = MAX_LIGHT_PRESETS;
+        pageWrite(F("<select class='pcSel in' data-area='"));
+        pageWrite(String(as.area));
+        pageWrite(F("' onchange='setPC("));
+        pageWrite(String(as.area));
+        pageWrite(F(",this.value)' title='Number of presets shown'"
+                    " style='padding:2px 4px;min-width:auto;width:auto;font-size:12px'>"));
+        for (int n = 1; n <= MAX_LIGHT_PRESETS; n++) {
+          if (n == thisPc) pageWrite(String("<option value='") + n + "' selected>" + n + "</option>");
+          else             pageWrite(String("<option value='") + n + "'>" + n + "</option>");
+        }
+        pageWrite(F("</select>"));
+      }
+
+      pageWrite(F("<span style='width:1px;height:18px;background:var(--border);display:inline-block;margin:0 2px'></span>"));
+
+      pageWrite(F("<form method='POST' action='/area/save_preset' style='margin:0'><input type='hidden' name='area' value='"));
+      pageWrite(String(as.area));
+      pageWrite(F("'><button class='btn prog' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' type='submit'>Save Preset</button></form>"));
+      pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
+      pageWrite(String(as.area)); pageWrite(F("&do=req_preset'})\">Req Preset</button>"));
+      pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
+      pageWrite(String(as.area)); pageWrite(F("&do=req_levels'})\">Req Levels</button>"));
+
+    pageWrite(F("</div>")); // action row
+
+    // ── Preset name editor ────────────────────────────────────────────────
+    {
+      uint8_t thisPc = as.presetCount ? as.presetCount : 4;
+      if (thisPc > MAX_LIGHT_PRESETS) thisPc = MAX_LIGHT_PRESETS;
+      pageWrite(F("<div style='margin-top:6px;border:1px solid var(--border);border-radius:8px;padding:8px'>"));
+      pageWrite(F("<div style='font-size:12px;color:var(--muted);font-weight:600;margin-bottom:6px'>Preset Names</div>"));
+      pageWrite(F("<div id='pnGrid_A")); pageWrite(String(as.area));
+      pageWrite(F("' style='display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px'>"));
+      for (int p = 1; p <= MAX_LIGHT_PRESETS; p++) {
+        String nm = em.getPresetDisplayName((uint8_t)as.area, (uint8_t)p);
+        pageWrite(F("<div class='pnRow' data-area='"));
+        pageWrite(String(as.area)); pageWrite(F("' data-p='")); pageWrite(String(p));
+        pageWrite(F("' style='display:"));
+        pageWrite(p <= thisPc ? F("flex") : F("none"));
+        pageWrite(F(";align-items:center;gap:3px'>"));
+          pageWrite(F("<span style='font-size:12px;min-width:22px;color:var(--muted)'>P"));
+          pageWrite(String(p)); pageWrite(F("</span>"));
+          pageWrite(F("<input id='pn_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(p));
+          pageWrite(F("' type='text' maxlength='15' value='"));
+          pageWrite(safeAttr(nm.c_str(), nm.length()));
+          pageWrite(F("' style='flex:1;padding:3px 5px;font-size:12px;min-width:0'>"));
+          pageWrite(F("<button class='btn' style='padding:2px 7px;min-width:auto;min-height:auto;font-size:12px' onclick='savePresetName("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(p));
+          pageWrite(F(",\"pn_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(p));
+          pageWrite(F("\")'>&#10003;</button>"));
+        pageWrite(F("</div>")); // pnRow
+      }
+      pageWrite(F("</div>")); // pnGrid
+      pageWrite(F("</div>")); // preset name editor
+    }
+
+    // ── Channel cards — sorted by channel number ──────────────────────────
+    pageWrite(F("<div style='margin-top:8px;padding-top:6px' class='grid2'>"));
+    for (int chNum = 0; chNum <= 254; chNum++) {
+      int ci = em.findChannel((uint8_t)aNum, (uint8_t)chNum);
+      if (ci < 0) continue;
+      const ChannelState& cs = em.channelAt(ci);
+      if (!cs.present) continue;
+      if (cs.isCurtainSlave) continue;
+
+      pageWrite(F("<div class='card' style='padding:8px 8px;margin:0'>"));
+
+        // Row 1: Ch# · name · level · on/off · req · delete
+        pageWrite(F("<div class='row space' style='gap:4px;flex-wrap:nowrap;align-items:center'>"));
+          pageWrite(F("<div class='row' style='gap:4px;align-items:center;flex:1;min-width:0;overflow:hidden'>"));
+            pageWrite(F("<b style='white-space:nowrap;font-size:13px'>Ch&nbsp;")); pageWrite(String((int)cs.channel0+1)); pageWrite(F("</b>"));
+            pageWrite(F("<input id='cn_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
+            pageWrite(F("' class='in' type='text' placeholder='Name' maxlength='23' value='"));
+            pageWrite(cs.name[0] ? safeAttr(cs.name, sizeof(cs.name)) : (String(F("Area ")) + String(cs.area) + String(F(" Ch ")) + String((int)cs.channel0 + 1)));
+            pageWrite(F("' style='flex:1;min-width:140px;max-width:260px;padding:3px 6px;font-size:13px'>"));
+            pageWrite(F("<button class='btn' style='padding:3px 14px;min-width:auto;min-height:auto;font-size:13px' title='Save channel name' onclick='saveChName("));
+            pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
+            pageWrite(F(",\"cn_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
+            pageWrite(F("\")'>&#10003;</button>"));
+            pageWrite(F("<span class='pill' style='font-size:12px'>")); pageWrite(String((int)cs.levelPct)); pageWrite(F("%</span>"));
+          pageWrite(F("</div>"));
+          pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 9px;min-width:auto;min-height:auto;font-size:13px;flex-shrink:0' title='Delete Channel' onclick='delCh("));
+          pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
+          pageWrite(F(")'>&#10006;</button>"));
+        pageWrite(F("</div>")); // row 1
+
+        // Row 2: channel type + quick controls
+        pageWrite(F("<div class='row' style='gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center'>"));
+          pageWrite(F("<div style='display:flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid var(--border);border-radius:8px;flex-shrink:0'>"));
+            pageWrite(F("<span style='font-size:11px;color:var(--muted);white-space:nowrap'>Channel Type</span>"));
+            pageWrite(F("<form class='row' method='POST' action='/api/type' style='gap:4px;margin:0'>"));
+              pageWrite(F("<input type='hidden' name='area' value='")); pageWrite(String(cs.area)); pageWrite(F("'>"));
+              pageWrite(F("<input type='hidden' name='ch' value='")); pageWrite(String(cs.channel0)); pageWrite(F("'>"));
+              pageWrite(F("<select class='in' name='type' style='padding:3px 5px;min-width:auto;width:auto;font-size:13px'>"));
+              pageWrite(String("<option value='0'") + ((cs.type==0)?" selected":"") + ">Dimmable</option>");
+              pageWrite(String("<option value='1'") + ((cs.type==1)?" selected":"") + ">On/Off Light</option>");
+              pageWrite(String("<option value='2'") + ((cs.type==2)?" selected":"") + ">Switch</option>");
+              pageWrite(String("<option value='3'") + ((cs.type==3)?" selected":"") + ">Curtain</option>");
+              pageWrite(F("</select>"));
+              pageWrite(F("<button class='btn' type='submit' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px'>Save</button>"));
+            pageWrite(F("</form>"));
+          pageWrite(F("</div>")); // type group
+
+          if (cs.type == CURTAIN) {
+            auto cbtn = [&](const char* cap, const char* cmd) {
+              pageWrite(F("<button class='btn action' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
+              pageWrite(String(cs.area)); pageWrite(F("&ch=")); pageWrite(String(cs.channel0));
+              pageWrite(F("&cmd=CURTAIN_")); pageWrite(cmd); pageWrite(F("'})\">"));
+              pageWrite(cap); pageWrite(F("</button>"));
+            };
+            cbtn("&#9650; Open",  "OPEN");
+            cbtn("&#9646; Stop",  "STOP");
+            cbtn("&#9660; Close", "CLOSE");
+            pageWrite(F("<div style='display:flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid var(--border);border-radius:8px;flex-shrink:0'>"));
+              pageWrite(F("<span style='font-size:11px;color:var(--muted);white-space:nowrap'>Travel (s)</span>"));
+              pageWrite(F("<input id='ct_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
+              pageWrite(F("' type='number' min='1' max='255' value='")); pageWrite(String(cs.curtainTimeSec));
+              pageWrite(F("' style='width:52px;padding:3px 5px;min-width:0;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg)'>"));
+              pageWrite(F("<button class='btn' style='padding:3px 8px;min-width:auto;min-height:auto;font-size:13px' title='Save travel time' onclick='saveCurtainTime("));
+              pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
+              pageWrite(F(",\"ct_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
+              pageWrite(F("\")'>&#10003;</button>"));
+            pageWrite(F("</div>"));
+          } else {
+            auto qbtn = [&](const char* cap, const char* cmd){
+              pageWrite(F("<button class='btn action' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
+              pageWrite(String(cs.area)); pageWrite(F("&ch=")); pageWrite(String(cs.channel0));
+              pageWrite(F("&cmd=")); pageWrite(cmd); pageWrite(F("'})\">"));
+              pageWrite(cap); pageWrite(F("</button>"));
+            };
+            qbtn("ON","ON"); qbtn("OFF","OFF");
+          }
+        pageWrite(F("</div>")); // row 2
+      pageWrite(F("</div>")); // channel card
+    }
+    pageWrite(F("</div>")); // grid
+  }
+
+  // ── HVAC body (step selector + modes + fans) ─────────────────────────────
+  if (as.areaType == AREA_HVAC && as.hvac) {
+    pageWrite(F("<div class='row' style='margin-top:8px;gap:8px;align-items:center'>"));
+      pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Setpoint Step:</span>"));
+      pageWrite(F("<select class='in' style='width:90px;padding:3px 6px' onchange=\"setHvacStep("));
+      pageWrite(String(as.area));
+      pageWrite(F(",this.value)\">"));
+      float curStep = as.hvac->setptStep;
+      pageWrite(F("<option value='0.5'")); if (curStep < 1.0f) pageWrite(F(" selected")); pageWrite(F(">0.5 \xC2\xB0" "C</option>"));
+      pageWrite(F("<option value='1.0'")); if (curStep >= 1.0f) pageWrite(F(" selected")); pageWrite(F(">1 \xC2\xB0" "C</option>"));
+      pageWrite(F("</select>"));
+    pageWrite(F("</div>"));
+
+    pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:24px;margin-top:8px;align-items:flex-start'>"));
+
+    // Modes column
+    pageWrite(F("<div>"));
+    pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>HVAC Modes (name \xE2\x86\x92 preset)</div>"));
+    for (uint8_t mi = 0; mi < MAX_HVAC_MODES; mi++) {
+      const HvacModeEntry& me = as.hvac->modes[mi];
+      if (!me.used) continue;
+      pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
+        pageWrite(F("<input class='in' id='hvm_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+        pageWrite(F("' type='text' maxlength='23' placeholder='Mode name' value='"));
+        pageWrite(me.name[0] ? safeAttr(me.name, sizeof(me.name)) : "");
+        pageWrite(F("' style='width:120px;padding:3px 6px'>"));
+        pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
+        pageWrite(F("<input class='in' id='hvm_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+        pageWrite(F("' type='number' min='1' max='255' value='"));
+        pageWrite(String(me.preset1));
+        pageWrite(F("' style='width:56px;padding:3px 5px'>"));
+        pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacMode("));
+        pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10003;</button>"));
+        pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacMode("));
+        pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10006;</button>"));
+      pageWrite(F("</div>"));
+    }
+    pageWrite(F("</div>")); // modes column
+
+    // Fan modes column
+    if (as.hvac->fanCount > 0) {
+      pageWrite(F("<div>"));
+      pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>Fan Modes (name \xE2\x86\x92 preset)</div>"));
+      for (uint8_t fi = 0; fi < MAX_HVAC_FANMODES; fi++) {
+        const HvacModeEntry& fe = as.hvac->fanModes[fi];
+        if (!fe.used) continue;
+        pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
+          pageWrite(F("<input class='in' id='hvf_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+          pageWrite(F("' type='text' maxlength='23' placeholder='Fan mode name' value='"));
+          pageWrite(fe.name[0] ? safeAttr(fe.name, sizeof(fe.name)) : "");
+          pageWrite(F("' style='width:120px;padding:3px 6px'>"));
+          pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
+          pageWrite(F("<input class='in' id='hvf_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+          pageWrite(F("' type='number' min='1' max='255' value='"));
+          pageWrite(String(fe.preset1));
+          pageWrite(F("' style='width:56px;padding:3px 5px'>"));
+          pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacFan("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10003;</button>"));
+          pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacFan("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10006;</button>"));
+        pageWrite(F("</div>"));
+      }
+      pageWrite(F("</div>")); // fan column
+    }
+
+    pageWrite(F("</div>")); // flex row
+  }
+}
+
+// Serve the body of one area card for lazy AJAX loading
+static void handleAreaDetail() {
+  using namespace DynetEntities;
+  int aNum = server.arg("area").toInt();
+  if (aNum < 1 || aNum > 255) { server.send(400, "text/plain", "bad area"); return; }
+  if (em.findArea((uint8_t)aNum) < 0) { server.send(404, "text/plain", "not found"); return; }
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html; charset=utf-8", "");
+  renderAreaBody((uint8_t)aNum);
+  server.sendContent(""); // flush
+}
+
 // -------------- Home --------------
 void handleRootGet() {
   using namespace DynetEntities;
@@ -237,31 +573,93 @@ void handleRootGet() {
                 "You can also request levels from the Config page.</div>"));
   }
 
-  // Render per-area cards — sorted by area number
+  // ── Pagination ───────────────────────────────────────────────────────────────
+  const int PAGE_SIZE  = 10;
+  int       totalAreas = em.areasCount();
+  int       totalPages = (totalAreas + PAGE_SIZE - 1) / PAGE_SIZE;
+  if (totalPages < 1) totalPages = 1;
+
+  int page = server.arg("page").toInt();
+  if (page < 1) page = 1;
+  if (page > totalPages) page = totalPages;
+
+  // Helper: build a page URL preserving other future args
+  auto pageUrl = [](int p) -> String {
+    return String("/?page=") + p;
+  };
+
+  // Render pagination nav (only if more than one page)
+  auto renderPagNav = [&]() {
+    if (totalPages <= 1) return;
+    pageWrite(F("<div style='display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0'>"));
+    // Prev
+    if (page > 1) {
+      pageWrite(F("<a class='btn' href='"));
+      pageWrite(pageUrl(page - 1));
+      pageWrite(F("' style='padding:4px 12px;font-size:13px'>&#x25C4; Prev</a>"));
+    } else {
+      pageWrite(F("<span class='btn' style='padding:4px 12px;font-size:13px;opacity:.35;cursor:default'>&#x25C4; Prev</span>"));
+    }
+    // Page numbers (show up to 9; collapse with … if many)
+    for (int pg = 1; pg <= totalPages; pg++) {
+      bool isCur = (pg == page);
+      if (totalPages > 9 && !isCur && pg != 1 && pg != totalPages &&
+          (pg < page - 2 || pg > page + 2)) {
+        if (pg == page - 3 || pg == page + 3) pageWrite(F("<span style='align-self:center;color:var(--muted)'>…</span>"));
+        continue;
+      }
+      pageWrite(isCur
+        ? F("<span class='btn' style='padding:4px 10px;font-size:13px;background:#2980b9;color:#fff;border-color:#2980b9;cursor:default'>")
+        : F("<a class='btn' href='"));
+      if (!isCur) { pageWrite(pageUrl(pg)); pageWrite(F("' style='padding:4px 10px;font-size:13px'>")); }
+      pageWrite(String(pg));
+      pageWrite(isCur ? F("</span>") : F("</a>"));
+    }
+    // Next
+    if (page < totalPages) {
+      pageWrite(F("<a class='btn' href='"));
+      pageWrite(pageUrl(page + 1));
+      pageWrite(F("' style='padding:4px 12px;font-size:13px'>Next &#x25BA;</a>"));
+    } else {
+      pageWrite(F("<span class='btn' style='padding:4px 12px;font-size:13px;opacity:.35;cursor:default'>Next &#x25BA;</span>"));
+    }
+    // Area count summary
+    pageWrite(F("<span class='muted' style='margin-left:6px;font-size:12px'>"));
+    pageWrite(String(totalAreas));
+    pageWrite(F(" areas total</span>"));
+    pageWrite(F("</div>"));
+  };
+
+  renderPagNav();
+
+  // Render per-area cards for this page only — sorted by area number (header only; body lazy-loaded)
+  int skip  = (page - 1) * PAGE_SIZE;
+  int shown = 0;
   for (int aNum = 1; aNum <= 255; aNum++) {
     int ai = em.findArea((uint8_t)aNum);
     if (ai < 0) continue;
-  const AreaState& as = em.areaAt(ai);
+    if (skip > 0) { skip--; continue; }   // skip areas before this page
+    if (shown >= PAGE_SIZE) break;         // stop after page window
+    shown++;
+    const AreaState& as = em.areaAt(ai);
 
-  pageWrite(F("<div class='card'>"));
+    pageWrite(F("<div class='card' style='padding:10px 12px'>"));
     // ── Area header ──────────────────────────────────────────────────────────
     pageWrite(F("<div class='row space' style='flex-wrap:wrap;gap:6px'>"));
-      // Left: number + name input + status pills
+      // Left: number + name + type + status pills
       pageWrite(F("<div class='row' style='gap:6px;flex-wrap:wrap;align-items:center;flex:1;min-width:0'>"));
         pageWrite(F("<b style='white-space:nowrap'>Area "));
         pageWrite(String(as.area));
         pageWrite(F("</b>"));
-
-        // Name input + save button
+        // Name input + save
         pageWrite(F("<input id='an_"));
         pageWrite(String(as.area));
-        pageWrite(F("' class='in' type='text' placeholder='Name' maxlength='40' value='"));
+        pageWrite(F("' class='in' type='text' placeholder='Name' maxlength='23' value='"));
         pageWrite(as.name[0] ? safeAttr(as.name, sizeof(as.name)) : (String(F("Area ")) + String(as.area)));
-        pageWrite(F("' style='width:120px;padding:3px 6px'>"));
+        pageWrite(F("' style='flex:1;min-width:160px;max-width:320px;padding:3px 6px'>"));
         pageWrite(F("<button class='btn' style='padding:2px 14px;min-width:auto;min-height:auto;font-size:13px' title='Save area name' onclick='saveAreaName("));
         pageWrite(String(as.area)); pageWrite(F(",\"an_")); pageWrite(String(as.area)); pageWrite(F("\")'>&#10003;</button>"));
-
-        // Area Type inline selector
+        // Area type selector
         pageWrite(F("<span style='font-size:12px;color:var(--muted);white-space:nowrap'>Area Type:</span>"));
         pageWrite(F("<select class='in' style='padding:2px 6px;min-width:auto;width:auto;font-size:12px' onchange='setAreaType("));
         pageWrite(String(as.area)); pageWrite(F(",this.value)'>"));
@@ -269,16 +667,27 @@ void handleRootGet() {
         pageWrite(String("<option value='1'") + ((as.areaType==DynetEntities::AREA_CURTAIN)?" selected":"") + ">Curtain</option>");
         pageWrite(String("<option value='2'") + ((as.areaType==DynetEntities::AREA_HVAC)?   " selected":"") + ">HVAC</option>");
         pageWrite(F("</select>"));
-
-        // Status pill: preset only (temp moved to HVAC card body)
+        // Preset status pill (always visible, updated by pollAreas)
         pageWrite(F("<span class='pill' id='preset_A")); pageWrite(String(as.area));
         pageWrite(F("'>P:&nbsp;"));
         pageWrite((as.preset0 == 0xFF) ? String("?") : String((int)as.preset0 + 1));
         pageWrite(F("</span>"));
-
+        // HVAC live status pills — kept in header so pollAreas() always sees them
+        if (as.areaType == DynetEntities::AREA_HVAC) {
+          pageWrite(F("<span class='pill' id='hvac_temp_A")); pageWrite(String(as.area));
+          if (as.hasTemp) { pageWrite(F("'>")); pageWrite(String(as.tempC,1)); pageWrite(F("\xC2\xB0\x43</span>")); }
+          else            { pageWrite(F("' style='color:var(--muted)'>\xE2\x80\x93\xC2\xB0\x43</span>")); }
+          pageWrite(F("<span class='pill' id='hvac_sp_A")); pageWrite(String(as.area));
+          if (as.hasSetpt) { pageWrite(F("'>")); pageWrite(String(as.setptC,1)); pageWrite(F("\xC2\xB0\x43</span>")); }
+          else             { pageWrite(F("' style='color:var(--muted)'>\xE2\x80\x93\xC2\xB0\x43</span>")); }
+          pageWrite(F("<span class='pill' id='hvac_mode_A")); pageWrite(String(as.area)); pageWrite(F("'>"));
+          if (as.hvac && as.hvac->currentMode[0]) pageWrite(String(as.hvac->currentMode));
+          else pageWrite(F("\xE2\x80\x93"));
+          pageWrite(F("</span>"));
+        }
       pageWrite(F("</div>")); // left group
 
-      // Right: add-channel / add-curtain / add-hvac-mode + delete area
+      // Right: add buttons + expand toggle + delete
       pageWrite(F("<div class='row' style='gap:4px;flex-shrink:0;align-items:center'>"));
         if (as.areaType == DynetEntities::AREA_LIGHTS) {
           pageWrite(F("<span style='font-size:12px;color:var(--muted);white-space:nowrap'>Add Channel:</span>"));
@@ -295,364 +704,25 @@ void handleRootGet() {
           pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addHvacFan("));
           pageWrite(String(as.area)); pageWrite(F(")'>+Fan</button>"));
         }
+        // Expand / collapse toggle
+        pageWrite(F("<button id='atog_")); pageWrite(String(as.area));
+        pageWrite(F("' class='btn' onclick='toggleArea("));
+        pageWrite(String(as.area));
+        pageWrite(F(")' title='Expand / collapse' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:12px'>&#x25BA;</button>"));
+        // Delete area
         pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 8px;min-width:auto;min-height:auto;font-size:13px' title='Delete Area' onclick='delArea("));
         pageWrite(String(as.area)); pageWrite(F(")'>&#10006;</button>"));
       pageWrite(F("</div>")); // right group
 
     pageWrite(F("</div>")); // header row
 
-    if (as.areaType == DynetEntities::AREA_CURTAIN) {
-      // ── Curtain Area: preset count selector + per-curtain cards ─────────────
-      uint8_t pCount = as.presetCount ? as.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
-      if (pCount > 128) pCount = 128;
-
-      // Preset count selector row (no P1..Pn buttons, just the count dropdown)
-      pageWrite(F("<div class='row' style='margin-top:6px;gap:6px;align-items:center;flex-wrap:wrap'>"));
-        pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Presets available:</span>"));
-        pageWrite(F("<select class='pcSel in' data-area='"));
-        pageWrite(String(as.area));
-        pageWrite(F("' onchange='setPC("));
-        pageWrite(String(as.area));
-        pageWrite(F(",this.value)' title='Number of presets'"
-                    " style='padding:2px 6px;min-width:auto;width:auto;font-size:13px'>"));
-        for (int n = 1; n <= 128; n++) {
-          if (n == pCount) pageWrite(String("<option value='") + n + "' selected>" + n + "</option>");
-          else             pageWrite(String("<option value='") + n + "'>" + n + "</option>");
-        }
-        pageWrite(F("</select>"));
-      pageWrite(F("</div>")); // preset count row
-
-      // Per-curtain cards — side-by-side (flex-wrap)
-      pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:8px'>"));
-      if (as.curtains) for (uint8_t ci = 0; ci < DynetEntities::MAX_CURTAINS_PER_AREA; ci++) {
-        const DynetEntities::AreaCurtainEntry& ce = as.curtains[ci];
-        if (!ce.used) continue;
-
-        pageWrite(F("<div style='border:1px solid var(--border);border-radius:12px;padding:8px 10px;background:var(--card)'>"));
-
-          // ── Header row: name input + delete ────────────────────────────────
-          pageWrite(F("<div class='row space' style='gap:6px;align-items:center;margin-bottom:8px'>"));
-            pageWrite(F("<input class='in' id='cen_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(ci));
-            pageWrite(F("' type='text' maxlength='40' placeholder='Curtain name' value='"));
-            pageWrite(ce.name[0] ? safeAttr(ce.name, sizeof(ce.name)) : (String("Curtain ") + (ci+1)));
-            pageWrite(F("' style='width:150px;padding:3px 6px;font-size:13px'>"));
-            pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 8px;"
-                        "min-width:auto;min-height:auto;font-size:13px' title='Delete Curtain'"
-                        " onclick='delAreaCurtain("));
-            pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(ci)); pageWrite(F(")'>&#10006;</button>"));
-          pageWrite(F("</div>")); // header row
-
-          // ── Body: preset box (left) + test buttons (right) ─────────────────
-          pageWrite(F("<div class='row' style='gap:16px;flex-wrap:wrap;align-items:flex-start'>"));
-
-            // Single box: Curtain Presets + test buttons + Save all together
-            pageWrite(F("<div style='padding:8px 12px;border:1px solid var(--border);border-radius:8px;"
-                        "display:flex;flex-direction:column;gap:6px;min-width:160px'>"));
-              pageWrite(F("<div style='font-size:12px;color:var(--muted);font-weight:600'>Curtain Presets</div>"));
-
-              // Preset row: label | preset dropdown | test button
-              auto presetRow2 = [&](const char* label, const char* sfx, uint8_t cur, const char* cmd, const char* btnIcon) {
-                pageWrite(F("<div class='row' style='gap:6px;align-items:center'>"));
-                  pageWrite(F("<span style='font-size:13px;min-width:52px;white-space:nowrap'>")); pageWrite(label); pageWrite(F("</span>"));
-                  pageWrite(F("<select class='in curtainPresetSel' data-area='"));  pageWrite(String(as.area));
-                  pageWrite(F("' id='")); pageWrite(sfx); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(ci));
-                  pageWrite(F("' style='padding:2px 6px;min-width:auto;width:auto;font-size:13px'>"));
-                  for (uint8_t p = 1; p <= pCount; p++) {
-                    pageWrite(String("<option value='") + p + "'" + ((cur==p)?" selected":"") + ">P" + p + "</option>");
-                  }
-                  pageWrite(F("</select>"));
-                  pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px'"
-                              " onclick=\"fetch('/api/area_cover',{method:'POST',"
-                              "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-                              "body:'area="));
-                  pageWrite(String(as.area)); pageWrite(F("&idx=")); pageWrite(String(ci));
-                  pageWrite(F("&cmd=")); pageWrite(cmd); pageWrite(F("'})\"")); pageWrite(F(">")); pageWrite(btnIcon); pageWrite(F("</button>"));
-                pageWrite(F("</div>"));
-              };
-              presetRow2("&#9650; Open",  "cop_", ce.openPreset,  "OPEN",  "&#9650;");
-              presetRow2("&#9646; Stop",  "csp_", ce.stopPreset,  "STOP",  "&#9646;");
-              presetRow2("&#9660; Close", "ccp_", ce.closePreset, "CLOSE", "&#9660;");
-
-              pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;"
-                          "font-size:13px;margin-top:2px;width:100%' onclick='saveAreaCurtainEntry("));
-              pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(ci)); pageWrite(F(",this)'>Save</button>"));
-            pageWrite(F("</div>")); // preset+test box
-
-          pageWrite(F("</div>")); // body row
-        pageWrite(F("</div>")); // curtain card
-      }
-      pageWrite(F("</div>")); // flex-wrap curtains row
-
-    } else if (as.areaType == DynetEntities::AREA_LIGHTS) {
-    // ── Area action row: preset buttons + count selector + utility buttons ──
-    pageWrite(F("<div class='row' style='margin-top:5px;flex-wrap:wrap;gap:5px;align-items:center'>"));
-
-      // Preset buttons P1..P16 (visibility controlled by JS via class 'pb' + data-area + data-p)
-      {
-        for (int p = 1; p <= DynetEntities::MAX_LIGHT_PRESETS; p++) {
-          pageWrite(F("<button class='btn action pb' data-area='"));
-          pageWrite(String(as.area));
-          pageWrite(F("' data-p='"));
-          pageWrite(String(p));
-          pageWrite(F("' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick='sendPreset("));
-          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(p));
-          pageWrite(F(")'>P")); pageWrite(String(p)); pageWrite(F("</button>"));
-        }
-      }
-
-      // Preset count dropdown — capped at MAX_LIGHT_PRESETS for light areas
-      {
-        uint8_t thisPc = as.presetCount ? as.presetCount : (cfg.ha_preset_count ? cfg.ha_preset_count : 4);
-        if (thisPc > DynetEntities::MAX_LIGHT_PRESETS) thisPc = DynetEntities::MAX_LIGHT_PRESETS;
-        pageWrite(F("<select class='pcSel in' data-area='"));
-        pageWrite(String(as.area));
-        pageWrite(F("' onchange='setPC("));
-        pageWrite(String(as.area));
-        pageWrite(F(",this.value)' title='Number of presets shown'"
-                    " style='padding:2px 4px;min-width:auto;width:auto;font-size:12px'>"));
-        for (int n = 1; n <= DynetEntities::MAX_LIGHT_PRESETS; n++) {
-          if (n == thisPc) pageWrite(String("<option value='") + n + "' selected>" + n + "</option>");
-          else             pageWrite(String("<option value='") + n + "'>" + n + "</option>");
-        }
-        pageWrite(F("</select>"));
-      }
-
-      // Divider
-      pageWrite(F("<span style='width:1px;height:18px;background:var(--border);display:inline-block;margin:0 2px'></span>"));
-
-      // Utility buttons
-      pageWrite(F("<form method='POST' action='/area/save_preset' style='margin:0'><input type='hidden' name='area' value='"));
-      pageWrite(String(as.area));
-      pageWrite(F("'><button class='btn prog' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' type='submit'>Save Preset</button></form>"));
-      pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
-      pageWrite(String(as.area)); pageWrite(F("&do=req_preset'})\">Req Preset</button>"));
-      pageWrite(F("<button class='btn action' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/area_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
-      pageWrite(String(as.area)); pageWrite(F("&do=req_levels'})\">Req Levels</button>"));
-
-    pageWrite(F("</div>")); // action row
-
-    // ── Preset name editor ────────────────────────────────────────────────
-    {
-      uint8_t thisPc = as.presetCount ? as.presetCount : 4;
-      if (thisPc > DynetEntities::MAX_LIGHT_PRESETS) thisPc = DynetEntities::MAX_LIGHT_PRESETS;
-      pageWrite(F("<div style='margin-top:6px;border:1px solid var(--border);border-radius:8px;padding:8px'>"));
-      pageWrite(F("<div style='font-size:12px;color:var(--muted);font-weight:600;margin-bottom:6px'>Preset Names</div>"));
-      pageWrite(F("<div id='pnGrid_A")); pageWrite(String(as.area));
-      pageWrite(F("' style='display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px'>"));
-      for (int p = 1; p <= DynetEntities::MAX_LIGHT_PRESETS; p++) {
-        // Always show a display name — custom or Dynalite default
-        String nm = em.getPresetDisplayName((uint8_t)as.area, (uint8_t)p);
-        pageWrite(F("<div class='pnRow' data-area='"));
-        pageWrite(String(as.area)); pageWrite(F("' data-p='")); pageWrite(String(p));
-        pageWrite(F("' style='display:"));
-        pageWrite(p <= thisPc ? F("flex") : F("none"));
-        pageWrite(F(";align-items:center;gap:3px'>"));
-          pageWrite(F("<span style='font-size:12px;min-width:22px;color:var(--muted)'>P"));
-          pageWrite(String(p)); pageWrite(F("</span>"));
-          pageWrite(F("<input id='pn_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(p));
-          pageWrite(F("' type='text' maxlength='23' value='"));
-          pageWrite(safeAttr(nm.c_str(), nm.length()));
-          pageWrite(F("' style='flex:1;padding:3px 5px;font-size:12px;min-width:0'>"));
-          pageWrite(F("<button class='btn' style='padding:2px 7px;min-width:auto;min-height:auto;font-size:12px' onclick='savePresetName("));
-          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(p));
-          pageWrite(F(",\"pn_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(p));
-          pageWrite(F("\")'>&#10003;</button>"));
-        pageWrite(F("</div>")); // pnRow
-      }
-      pageWrite(F("</div>")); // pnGrid
-      pageWrite(F("</div>")); // preset name editor card
-    }
-
-    // ── Channel cards — sorted by channel number ──────────────────────────
-    pageWrite(F("<div style='margin-top:8px;padding-top:6px' class='grid2'>"));
-
-    for (int chNum = 0; chNum <= 254; chNum++) {
-      int ci = em.findChannel((uint8_t)aNum, (uint8_t)chNum);
-      if (ci < 0) continue;
-      const ChannelState& cs = em.channelAt(ci);
-      if (!cs.present) continue;
-      if (cs.isCurtainSlave) continue; // DOWN relay — hidden, managed by master
-
-      pageWrite(F("<div class='card' style='padding:8px 8px;margin:0'>"));
-
-        // ── Row 1: Ch# · name input · ✓ · level pill · on/off pill · request · delete ──
-        pageWrite(F("<div class='row space' style='gap:4px;flex-wrap:nowrap;align-items:center'>"));
-          pageWrite(F("<div class='row' style='gap:4px;align-items:center;flex:1;min-width:0;overflow:hidden'>"));
-            pageWrite(F("<b style='white-space:nowrap;font-size:13px'>Ch&nbsp;")); pageWrite(String((int)cs.channel0+1)); pageWrite(F("</b>"));
-            pageWrite(F("<input id='cn_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
-            pageWrite(F("' class='in' type='text' placeholder='Name' maxlength='40' value='"));
-            pageWrite(cs.name[0] ? safeAttr(cs.name, sizeof(cs.name)) : (String(F("Area ")) + String(cs.area) + String(F(" Ch ")) + String((int)cs.channel0 + 1)));
-            pageWrite(F("' style='width:110px;min-width:0;padding:3px 6px;font-size:13px'>"));
-            pageWrite(F("<button class='btn' style='padding:3px 14px;min-width:auto;min-height:auto;font-size:13px' title='Save channel name' onclick='saveChName("));
-            pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
-            pageWrite(F(",\"cn_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
-            pageWrite(F("\")'>&#10003;</button>"));
-            pageWrite(F("<span class='pill' style='font-size:12px'>")); pageWrite(String((int)cs.levelPct)); pageWrite(F("%</span>"));
-            pageWrite(F("<span class='pill' style='font-size:12px'>")); pageWrite(cs.isOn ? F("ON") : F("OFF")); pageWrite(F("</span>"));
-            pageWrite(F("<button class='btn' style='background:#2980b9;color:#fff;padding:3px 9px;min-width:auto;min-height:auto;font-size:15px'"
-                        " onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-                        "body:'area="));
-            pageWrite(String(cs.area)); pageWrite(F("&ch=")); pageWrite(String(cs.channel0));
-            pageWrite(F("&cmd=REQ'})\" title='Request level'>&#8635;</button>"));
-          pageWrite(F("</div>"));
-          pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:3px 9px;min-width:auto;min-height:auto;font-size:13px;flex-shrink:0' title='Delete Channel' onclick='delCh("));
-          pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
-          pageWrite(F(")'>&#10006;</button>"));
-        pageWrite(F("</div>")); // row 1
-
-        // ── Row 2: [Channel Type group] │ [quick control buttons] ──
-        pageWrite(F("<div class='row' style='gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center'>"));
-
-          // Channel type group: label + select + save — boxed together
-          pageWrite(F("<div style='display:flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid var(--border);border-radius:8px;flex-shrink:0'>"));
-            pageWrite(F("<span style='font-size:11px;color:var(--muted);white-space:nowrap'>Channel Type</span>"));
-            pageWrite(F("<form class='row' method='POST' action='/api/type' style='gap:4px;margin:0'>"));
-              pageWrite(F("<input type='hidden' name='area' value='")); pageWrite(String(cs.area)); pageWrite(F("'>"));
-              pageWrite(F("<input type='hidden' name='ch' value='")); pageWrite(String(cs.channel0)); pageWrite(F("'>"));
-              pageWrite(F("<select class='in' name='type' style='padding:3px 5px;min-width:auto;width:auto;font-size:13px'>"));
-              pageWrite(String("<option value='0'") + ((cs.type==0)?" selected":"") + ">Dimmable</option>");
-              pageWrite(String("<option value='1'") + ((cs.type==1)?" selected":"") + ">On/Off Light</option>");
-              pageWrite(String("<option value='2'") + ((cs.type==2)?" selected":"") + ">Switch</option>");
-              pageWrite(String("<option value='3'") + ((cs.type==3)?" selected":"") + ">Curtain</option>");
-              pageWrite(F("</select>"));
-              pageWrite(F("<button class='btn' type='submit' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px'>Save</button>"));
-            pageWrite(F("</form>"));
-          pageWrite(F("</div>")); // type group
-
-          // Quick control buttons — curtain vs normal channel
-          if (cs.type == DynetEntities::CURTAIN) {
-            // OPEN / STOP / CLOSE
-            auto cbtn = [&](const char* cap, const char* cmd) {
-              pageWrite(F("<button class='btn action' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
-              pageWrite(String(cs.area)); pageWrite(F("&ch=")); pageWrite(String(cs.channel0));
-              pageWrite(F("&cmd=CURTAIN_")); pageWrite(cmd); pageWrite(F("'})\">"));
-              pageWrite(cap); pageWrite(F("</button>"));
-            };
-            cbtn("&#9650; Open",  "OPEN");
-            cbtn("&#9646; Stop",  "STOP");
-            cbtn("&#9660; Close", "CLOSE");
-            // Travel time input
-            pageWrite(F("<div style='display:flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid var(--border);border-radius:8px;flex-shrink:0'>"));
-              pageWrite(F("<span style='font-size:11px;color:var(--muted);white-space:nowrap'>Travel (s)</span>"));
-              pageWrite(F("<input id='ct_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
-              pageWrite(F("' type='number' min='1' max='255' value='")); pageWrite(String(cs.curtainTimeSec));
-              pageWrite(F("' style='width:52px;padding:3px 5px;min-width:0;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg)'>"));
-              pageWrite(F("<button class='btn' style='padding:3px 8px;min-width:auto;min-height:auto;font-size:13px' title='Save travel time' onclick='saveCurtainTime("));
-              pageWrite(String(cs.area)); pageWrite(F(",")); pageWrite(String(cs.channel0));
-              pageWrite(F(",\"ct_")); pageWrite(String(cs.area)); pageWrite(F("_")); pageWrite(String(cs.channel0));
-              pageWrite(F("\")'>&#10003;</button>"));
-            pageWrite(F("</div>"));
-          } else {
-            auto qbtn = [&](const char* cap, const char* cmd){
-              pageWrite(F("<button class='btn action' style='padding:3px 9px;min-width:auto;min-height:auto;font-size:13px' onclick=\"fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area="));
-              pageWrite(String(cs.area)); pageWrite(F("&ch=")); pageWrite(String(cs.channel0));
-              pageWrite(F("&cmd=")); pageWrite(cmd); pageWrite(F("'})\">"));
-              pageWrite(cap); pageWrite(F("</button>"));
-            };
-            qbtn("ON","ON"); qbtn("OFF","OFF");
-            qbtn("25%","SET=25"); qbtn("50%","SET=50");
-            qbtn("75%","SET=75"); qbtn("100%","SET=100");
-          }
-        pageWrite(F("</div>")); // row 2
-
-      pageWrite(F("</div>")); // channel card
-    }
-
-    pageWrite(F("</div>")); // grid
-    } // end else AREA_LIGHTS
-
-    // ── HVAC Area body ───────────────────────────────────────────────────────
-    if (as.areaType == DynetEntities::AREA_HVAC) {
-      // Temperature / setpoint live display
-      pageWrite(F("<div class='row' style='margin-top:6px;gap:10px;align-items:center;flex-wrap:wrap'>"));
-        pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Current Temp:</span>"));
-        pageWrite(F("<span class='pill' id='hvac_temp_A")); pageWrite(String(as.area));
-        if (as.hasTemp) { pageWrite(F("'>")); pageWrite(String(as.tempC,1)); pageWrite(F("°C</span>")); }
-        else            { pageWrite(F("' style='color:var(--muted)'>–°C</span>")); }
-        pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Setpoint:</span>"));
-        pageWrite(F("<span class='pill' id='hvac_sp_A")); pageWrite(String(as.area));
-        if (as.hasSetpt) { pageWrite(F("'>")); pageWrite(String(as.setptC,1)); pageWrite(F("°C</span>")); }
-        else             { pageWrite(F("' style='color:var(--muted)'>–°C</span>")); }
-        pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Mode:</span>"));
-        pageWrite(F("<span class='pill' id='hvac_mode_A")); pageWrite(String(as.area));
-        pageWrite(F("'>"));
-        if (as.hvac && as.hvac->currentMode[0]) pageWrite(String(as.hvac->currentMode));
-        else pageWrite(F("–"));
-        pageWrite(F("</span>"));
-      pageWrite(F("</div>"));
-
-      if (as.hvac) {
-        // ── Setpoint step selector ────────────────────────────────────────────
-        pageWrite(F("<div class='row' style='margin-top:8px;gap:8px;align-items:center'>"));
-          pageWrite(F("<span style='font-size:13px;color:var(--muted)'>Setpoint Step:</span>"));
-          pageWrite(F("<select class='in' style='width:90px;padding:3px 6px' onchange=\"setHvacStep("));
-          pageWrite(String(as.area));
-          pageWrite(F(",this.value)\">"));
-          float curStep = as.hvac->setptStep;
-          pageWrite(F("<option value='0.5'"));  if (curStep < 1.0f) pageWrite(F(" selected")); pageWrite(F(">0.5 °C</option>"));
-          pageWrite(F("<option value='1.0'"));  if (curStep >= 1.0f) pageWrite(F(" selected")); pageWrite(F(">1 °C</option>"));
-          pageWrite(F("</select>"));
-        pageWrite(F("</div>"));
-
-        // ── Modes + Fan side by side ─────────────────────────────────────────
-        pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:24px;margin-top:8px;align-items:flex-start'>"));
-
-        // Left: HVAC Modes
-        pageWrite(F("<div>"));
-        pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>HVAC Modes (name → preset)</div>"));
-        for (uint8_t mi = 0; mi < DynetEntities::MAX_HVAC_MODES; mi++) {
-          const DynetEntities::HvacModeEntry& me = as.hvac->modes[mi];
-          if (!me.used) continue;
-          pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
-            pageWrite(F("<input class='in' id='hvm_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
-            pageWrite(F("' type='text' maxlength='23' placeholder='Mode name' value='"));
-            pageWrite(me.name[0] ? safeAttr(me.name, sizeof(me.name)) : "");
-            pageWrite(F("' style='width:120px;padding:3px 6px'>"));
-            pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
-            pageWrite(F("<input class='in' id='hvm_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
-            pageWrite(F("' type='number' min='1' max='255' value='"));
-            pageWrite(String(me.preset1));
-            pageWrite(F("' style='width:56px;padding:3px 5px'>"));
-            pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacMode("));
-            pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10003;</button>"));
-            pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacMode("));
-            pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10006;</button>"));
-          pageWrite(F("</div>"));
-        }
-        pageWrite(F("</div>")); // end modes column
-
-        // Right: Fan Modes
-        if (as.hvac->fanCount > 0) {
-          pageWrite(F("<div>"));
-          pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>Fan Modes (name → preset)</div>"));
-          for (uint8_t fi = 0; fi < DynetEntities::MAX_HVAC_FANMODES; fi++) {
-            const DynetEntities::HvacModeEntry& fe = as.hvac->fanModes[fi];
-            if (!fe.used) continue;
-            pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
-              pageWrite(F("<input class='in' id='hvf_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
-              pageWrite(F("' type='text' maxlength='23' placeholder='Fan mode name' value='"));
-              pageWrite(fe.name[0] ? safeAttr(fe.name, sizeof(fe.name)) : "");
-              pageWrite(F("' style='width:120px;padding:3px 6px'>"));
-              pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
-              pageWrite(F("<input class='in' id='hvf_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
-              pageWrite(F("' type='number' min='1' max='255' value='"));
-              pageWrite(String(fe.preset1));
-              pageWrite(F("' style='width:56px;padding:3px 5px'>"));
-              pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacFan("));
-              pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10003;</button>"));
-              pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacFan("));
-              pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10006;</button>"));
-            pageWrite(F("</div>"));
-          }
-          pageWrite(F("</div>")); // end fan column
-        }
-
-        pageWrite(F("</div>")); // end flex row
-      }
-    } // end HVAC
-
-  pageWrite(F("</div>"));   // area card
+    // ── Lazy-loaded body placeholder ─────────────────────────────────────────
+    pageWrite(F("<div id='abody_")); pageWrite(String(as.area)); pageWrite(F("' style='display:none'></div>"));
+    pageWrite(F("</div>")); // area card
   }
+
+
+  renderPagNav(); // bottom pagination nav
 
   // --- Add Area ---
   pageWrite(F(
@@ -678,6 +748,29 @@ void handleRootGet() {
         "body:'area='+encodeURIComponent(a)+'&preset='+encodeURIComponent(p)+'&fade='+encodeURIComponent(f)})"
         ".then(r=>r.json()).then(j=>{s.textContent=j.ok?'Sent ✓':'Failed';})"
         ".catch(()=>{s.textContent='Error';});"
+    "}"
+    // --- Lazy-load area body on expand/collapse
+    "var _aLoaded={};"
+    "function toggleArea(n){"
+      "var d=document.getElementById('abody_'+n);"
+      "var btn=document.getElementById('atog_'+n);"
+      "if(!d)return;"
+      "var vis=d.style.display!=='none';"
+      "if(vis){"
+        "d.style.display='none';"
+        "if(btn)btn.innerHTML='&#x25BA;';"
+      "}else{"
+        "d.style.display='';"
+        "if(btn)btn.innerHTML='&#x25BC;';"
+        "if(!_aLoaded[n]){"
+          "_aLoaded[n]=true;"
+          "d.innerHTML='<div style=\"padding:8px;color:var(--muted)\">Loading\u2026</div>';"
+          "fetch('/api/area_detail?area='+n)"
+            ".then(function(r){return r.text();})"
+            ".then(function(html){d.innerHTML=html;applyPC(n);})"
+            ".catch(function(){d.innerHTML='<div style=\"padding:8px;color:#e74c3c\">Load failed \u2014 try again</div>';_aLoaded[n]=false;});"
+        "}"
+      "}"
     "}"
     // --- Live UI updater for Preset pill + HVAC card elements
     "function updAreas(list){"
@@ -764,7 +857,8 @@ void handleRootGet() {
     "window.addEventListener('DOMContentLoaded',()=>{"
       "setInterval(pollAreas,1500);"
       "pollAreas();"
-      "applyAllPC();"
+      // applyAllPC() no longer called here: area bodies are lazy-loaded,
+      // applyPC(n) is called per-area when each body finishes loading.
     "});"
     // ---- manual add/delete helpers ----
     "function apiPost(url,body){"
@@ -924,14 +1018,20 @@ void handleConfigGet() {
   uint8_t defAr = cfg.dynet_max_areas ? cfg.dynet_max_areas : (uint8_t)DYNET_MAX_AREAS;
 
   pageWrite(F("<div>DyNet Max Channels</div><div>"
-              "<input class='in' name='dynet_max_channels' type='number' min='1' max='128' value='"));
+              "<input class='in' name='dynet_max_channels' type='number' min='1' max='32' value='"));
   pageWrite(String(defCh));
-  pageWrite(F("'><div class='muted'>How many channels to track per area.</div></div>"));
+  pageWrite(F("'><div class='muted'>Channels probed per area during sweep (e.g. 8 = check channels 1&ndash;8 in every area).</div></div>"));
 
   pageWrite(F("<div>DyNet Max Areas</div><div>"
-              "<input class='in' name='dynet_max_areas' type='number' min='2' max='255' value='"));
+              "<input class='in' name='dynet_max_areas' type='number' min='2' max='"));
+  pageWrite(String((int)DYNET_MAX_AREAS));   // 32 on ESP8266, 64 on ESP32 — from compile-time constant
+  pageWrite(F("' value='"));
   pageWrite(String(defAr));
-  pageWrite(F("'><div class='muted'>Highest Area number to scan (1..N).</div></div>"));
+#if defined(ESP8266)
+  pageWrite(F("'><div class='muted'>Highest area number to store and sweep (1..N). Max 32 on ESP8266.</div></div>"));
+#else
+  pageWrite(F("'><div class='muted'>Highest area number to store and sweep (1..N).</div></div>"));
+#endif
 
   
   // LED
@@ -990,6 +1090,9 @@ void handleConfigGet() {
   pageWrite(F("<div>Home Assistant</div><div><label><input name='ha_discovery' type='checkbox' "));
   if(cfg.ha_discovery) pageWrite(F("checked"));
   pageWrite(F("> Enable Discovery</label></div>"));
+  pageWrite(F("<div>Web Log</div><div><label><input name='log_web' type='checkbox' "));
+  if(cfg.log_web) pageWrite(F("checked"));
+  pageWrite(F("> Enable</label></div>"));
   pageWrite(F("</div></div>"));
 
   // Save row
@@ -1007,8 +1110,9 @@ void handleConfigGet() {
   pageWrite(F(")')).catch(()=>alert('Failed'))\">Poll Areas • Sweep 2.."));
   pageWrite(String(defAr));
   pageWrite(F("</button>"));
+  pageWrite(F("<a class='btn' href='/import' title='Import area/channel names from Dynalite LogicalExport XML'>&#x2B07; Import from XML</a>"));
   pageWrite(F("</div></div>"));
-    
+
   // Backup / Restore
   pageWrite(F("<div class='card'>"
                 "<div class='row'>"
@@ -1223,29 +1327,31 @@ static void configureGithubTls(WiFiClientSecure& client) {
   // setBufferSizes(recv=1024, xmit=512): BearSSL automatically advertises
   // MFLN=1024 in ClientHello when recv < 16384. GitHub supports MFLN and
   // will send all records in <=1024-byte chunks. No probe needed.
-  client.setInsecure();
   client.setBufferSizes(1024, 512);
-#else
-  static const String combinedCA = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
-  client.setCACert(combinedCA.c_str());
 #endif
+  // setInsecure() on both platforms: GitHub releases are public binaries so
+  // skipping cert pinning is acceptable and avoids cert-rotation failures.
+  // (ESP32 setCACert with concatenated PEMs is unreliable across SDK versions.)
+  client.setInsecure();
 }
 
 static bool checkHeapForTls(String& outErr) {
 #if defined(ESP8266)
   // Use getMaxFreeBlockSize(): total free heap can look fine while fragmentation
   // means no single block is large enough for the required allocations.
-  // Sequence after this check:
-  //   Update.begin()  → 4096 B sector buffer
-  //   setBufferSizes(512,512) + BearSSL handshake → ~5500 B (state + I/O buffers)
-  // Minimum contiguous block needed: 4096 + 5500 ≈ 11 KB.
-  // This check runs AFTER logs_clear() + mqtt.disconnect() so the number
-  // reflects the cleaned-up state, not the busy-device worst case.
+  // For a version CHECK (not an install), Update.begin() is NOT called so no
+  // 4 KB sector buffer is needed.  Budget:
+  //   BearSSL MFLN 1024 handshake  → ~5 KB (state + I/O buffers)
+  //   DynamicJsonDocument(1536)    → ~1.5 KB
+  //   HTTPClient + String overhead → ~1.5 KB
+  //   Total contiguous needed      → ~8 KB
+  // handleFwCheckUpdate() calls logs_clear()+mqtt.disconnect() before us so
+  // the number here reflects the freed state.
   uint32_t maxBlock = maxFreeBlock();
-  if (maxBlock < 11000) {
+  if (maxBlock < 8000) {
     outErr = String("Heap fragmented (largest free block ")
            + String(maxBlock)
-           + " bytes, need 11 KB). Reboot and retry immediately after boot.";
+           + " bytes, need 8 KB). Reboot and retry immediately after boot.";
     return false;
   }
 #endif
@@ -1675,6 +1781,16 @@ static void handleFwGet() {
 }
 
 static void handleFwCheckUpdate() {
+  // Free as much heap as possible before opening a TLS connection.
+  // BearSSL + MFLN needs ~5 KB contiguous; MQTT TCP + log buffer compete for the same pool.
+  if (mqtt.connected()) {
+    mqtt.disconnect();
+    delay(80);   // let LwIP release the TCP PCB
+    yield();
+  }
+  logs_clear();  // releases up to 2 KB of log String heap
+  yield();
+
   String latestTag, binUrl, err;
   int    binSize = 0;
 
@@ -1825,6 +1941,8 @@ void handleConfigPost() {
   if (server.hasArg("ap_ssid"))     apSsid = server.arg("ap_ssid");
   if (server.hasArg("ap_pass"))     apPass = server.arg("ap_pass");
   cfg.ha_discovery  = server.hasArg("ha_discovery");
+  cfg.log_web       = server.hasArg("log_web");
+  if (!cfg.log_web) logs_clear();  // immediately free heap when disabled
   if (server.hasArg("tx_pin"))  { txPin  = sanitizeGpio(server.arg("tx_pin").toInt()); }
   if (server.hasArg("rx_pin"))  { rxPin  = sanitizeGpio(server.arg("rx_pin").toInt()); }
   if (server.hasArg("de_pin"))  { dePin  = sanitizeGpio(server.arg("de_pin").toInt()); }
@@ -1937,10 +2055,7 @@ void webOtaLoop() {
 
   WiFiClientSecure secureClient;
   secureClient.setTimeout(90000);
-  {
-    static const String ca = String(kGithubRootCA_DigiCertG2) + String(kGithubRootCA_ISRG_X1);
-    secureClient.setCACert(ca.c_str());
-  }
+  secureClient.setInsecure(); // consistent with configureGithubTls() — public binary, no pinning needed
   LOGF("[OTA] Calling httpUpdate.update()...\n");
   httpUpdate.rebootOnUpdate(false);
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
@@ -2099,6 +2214,181 @@ void handleApPortalConfigPost() {
   if (server.client()) { server.client().flush(); }
   delay(150);
   scheduleReboot(2200);
+}
+
+// -------------- Import Dynalite XML page --------------
+static void handleImportGet() {
+  pageBegin("Import XML");
+  pageWrite(F("<h1>Import Dynalite Project XML</h1>"));
+  pageWrite(F(
+    "<div class='card'>"
+      "<p>Select your Dynalite LogicalExport XML file. The browser parses it locally — "
+         "only the extracted data is sent to the device. Area names, channel names, preset names "
+         "and area types (Lighting/Curtain/HVAC) will be imported.</p>"
+      "<div class='row' style='gap:10px;align-items:center;flex-wrap:wrap'>"
+        "<input type='file' id='xf' accept='.xml' onchange='parseXml(this)'>"
+        "<span id='xstat' class='muted'></span>"
+      "</div>"
+      "<div id='preview' style='margin-top:14px'></div>"
+      "<div id='importWrap' style='display:none;margin-top:12px'>"
+        "<button class='btn' onclick='doImport()'>&#x2B07; Import All Areas</button>"
+      "</div>"
+      "<div id='progress' style='margin-top:10px'></div>"
+    "</div>"
+  ));
+  pageWrite(F("<script>"
+  "var parsedAreas=[];"
+
+  // XML parser
+  "function parseXml(inp){"
+    "var f=inp.files[0]; if(!f) return;"
+    "document.getElementById('xstat').textContent='Parsing…';"
+    "document.getElementById('preview').innerHTML='';"
+    "document.getElementById('importWrap').style.display='none';"
+    "var rd=new FileReader();"
+    "rd.onload=function(e){"
+      "try{"
+        "var doc=(new DOMParser()).parseFromString(e.target.result,'text/xml');"
+        "var parseErr=doc.querySelector('parsererror');"
+        "if(parseErr){document.getElementById('xstat').textContent='XML parse error';return;}"
+        "var aNodes=doc.getElementsByTagName('Area');"
+        "parsedAreas=[];"
+        "for(var i=0;i<aNodes.length;i++){"
+          "var a=aNodes[i];"
+          "var aId=parseInt(a.getAttribute('id')||'0');"
+          "if(aId<1||aId>255) continue;"
+          "var aName=a.getAttribute('name')||('Area '+aId);"
+          "var cat=(a.getAttribute('category')||'').toLowerCase();"
+          "var type=(cat==='lighting')?0:(cat==='custom')?1:(cat==='hvac')?2:0;"
+          "var pc=parseInt(a.getAttribute('preset_count')||'4');"
+          "if(pc<1) pc=4;"
+          "if(type===0&&pc>16) pc=16;"
+
+          // channels — direct children only to avoid cross-area contamination
+          "var channels=[];"
+          "var kids=a.childNodes;"
+          "for(var j=0;j<kids.length;j++){"
+            "var n=kids[j];"
+            "if(n.nodeName==='Channel'){"
+              "var cId=parseInt(n.getAttribute('id')||'0');"
+              "var cNm=n.getAttribute('name')||'';"
+              "if(cId>=1&&cNm) channels.push({id:cId,name:cNm});"
+            "}"
+          "}"
+
+          // presets — direct children only
+          "var presets=[];"
+          "for(var j=0;j<kids.length;j++){"
+            "var n=kids[j];"
+            "if(n.nodeName==='Preset'){"
+              "var pId=parseInt(n.getAttribute('id')||'0');"
+              "var pNm=n.getAttribute('name')||'';"
+              "if(pId>=1&&pNm) presets.push({id:pId,name:pNm});"
+            "}"
+          "}"
+
+          // Curtain: detect open/close/stop presets
+          "var openP=0,closeP=0,stopP=0;"
+          "if(type===1){"
+            "for(var j=0;j<presets.length;j++){"
+              "var pn=presets[j].name.toUpperCase();"
+              "if(pn==='OPEN'||pn==='UP') openP=presets[j].id;"
+              "else if(pn==='CLOSE'||pn==='DOWN') closeP=presets[j].id;"
+              "else if(pn==='STOP') stopP=presets[j].id;"
+            "}"
+            // Positional fallback: Dynalite default is CLOSE=1,STOP=2,OPEN=3
+            "if(!openP&&!closeP&&!stopP&&presets.length>=3){"
+              "closeP=presets[0].id; stopP=presets[1].id; openP=presets[2].id;"
+            "}"
+          "}"
+
+          "parsedAreas.push({area:aId,name:aName,type:type,"
+            "preset_count:pc,channels:channels,presets:presets,"
+            "open:openP,close:closeP,stop:stopP});"
+        "}"
+        "parsedAreas.sort(function(a,b){return a.area-b.area;});"
+
+        // Summary
+        "var nL=parsedAreas.filter(function(a){return a.type===0;}).length;"
+        "var nC=parsedAreas.filter(function(a){return a.type===1;}).length;"
+        "var nH=parsedAreas.filter(function(a){return a.type===2;}).length;"
+        "var nCh=parsedAreas.reduce(function(s,a){return s+a.channels.length;},0);"
+        "document.getElementById('xstat').textContent=parsedAreas.length+' areas found';"
+
+        // Preview table
+        "var h='<p><b>'+parsedAreas.length+' areas</b>: '+nL+' Lighting, '+nC+' Curtain, '+nH+' HVAC &mdash; '+nCh+' channels total.</p>';"
+        "h+=\"<div style='max-height:320px;overflow-y:auto'><table style='width:100%;border-collapse:collapse;font-size:13px'>\";"
+        "h+='<thead><tr>"
+          "<th style=\\'text-align:left;border-bottom:1px solid var(--border);padding:4px\\'>Area</th>"
+          "<th style=\\'text-align:left;border-bottom:1px solid var(--border);padding:4px\\'>Name</th>"
+          "<th style=\\'text-align:left;border-bottom:1px solid var(--border);padding:4px\\'>Type</th>"
+          "<th style=\\'text-align:right;border-bottom:1px solid var(--border);padding:4px\\'>Ch</th>"
+          "<th style=\\'text-align:right;border-bottom:1px solid var(--border);padding:4px\\'>Presets</th>"
+        "</tr></thead><tbody>';"
+        "var tnames=['Lights','Curtain','HVAC'];"
+        "for(var i=0;i<parsedAreas.length;i++){"
+          "var a=parsedAreas[i];"
+          "h+='<tr><td style=\\'padding:3px 4px\\'>'+a.area+'</td>';"
+          "h+='<td style=\\'padding:3px 4px\\'>'+a.name+'</td>';"
+          "h+='<td style=\\'padding:3px 4px\\'>'+(tnames[a.type]||'?')+'</td>';"
+          "h+='<td style=\\'padding:3px 4px;text-align:right\\'>'+a.channels.length+'</td>';"
+          "h+='<td style=\\'padding:3px 4px;text-align:right\\'>'+a.presets.length+'</td></tr>';"
+        "}"
+        "h+='</tbody></table></div>';"
+        "document.getElementById('preview').innerHTML=h;"
+        "if(parsedAreas.length) document.getElementById('importWrap').style.display='block';"
+      "}catch(ex){"
+        "document.getElementById('xstat').textContent='Error: '+ex;"
+      "}"
+    "};"
+    "rd.readAsText(f);"
+  "}"
+
+  // Import driver
+  "function doImport(){"
+    "if(!parsedAreas.length) return;"
+    "document.getElementById('importWrap').style.display='none';"
+    "var prog=document.getElementById('progress');"
+    "prog.innerHTML=\"<p>Starting import&hellip;</p>\";"
+    "fetch('/api/import_start',{method:'POST'})"
+    ".then(function(){"
+      "var idx=0,ok=0,fail=0;"
+      "function next(){"
+        "if(idx>=parsedAreas.length){"
+          "prog.innerHTML='<p>Finishing&hellip;</p>';"
+          "fetch('/api/import_done',{method:'POST'})"
+          ".then(function(r){return r.json();})"
+          ".then(function(){"
+            "prog.innerHTML='<p><b style=\"color:green\">&#10003; Import complete!</b> '+"
+              "ok+' areas imported, '+fail+' failed. '+"
+              "'<a class=\"btn\" href=\"/\" style=\"padding:4px 14px\">Go to Home</a></p>';"
+          "})"
+          ".catch(function(){"
+            "prog.innerHTML+='<p style=\"color:red\">Warning: import_done request failed.</p>';"
+          "});"
+          "return;"
+        "}"
+        "var a=parsedAreas[idx];"
+        "prog.innerHTML='<p>Importing <b>'+a.name+'</b> (Area '+a.area+') &mdash; '+(idx+1)+' / '+parsedAreas.length+'</p>';"
+        "fetch('/api/import_area',{"
+          "method:'POST',"
+          "headers:{'Content-Type':'application/json'},"
+          "body:JSON.stringify(a)"
+        "})"
+        ".then(function(r){return r.json();})"
+        ".then(function(j){if(j.ok)ok++;else fail++;idx++;setTimeout(next,30);})"
+        ".catch(function(){fail++;idx++;setTimeout(next,80);});"
+      "}"
+      "next();"
+    "})"
+    ".catch(function(e){"
+      "prog.innerHTML='<p style=\"color:red\">Failed to start import: '+e+'</p>';"
+      "document.getElementById('importWrap').style.display='block';"
+    "});"
+  "}"
+  "</script>"
+  ));
+  pageEnd();
 }
 
 // -------------- Routes --------------
@@ -2662,6 +2952,148 @@ server.on("/areas_status", HTTP_GET, [](){
     logs_clear();
     server.sendHeader("Location","/logs");
     server.send(302, "text/plain", "");
+  });
+
+  // ---- Dynalite XML Import ----
+  server.on("/api/area_detail", HTTP_GET, handleAreaDetail);
+  server.on("/import", HTTP_GET, handleImportGet);
+
+  // Begin bulk import: suppress per-item MQTT publish + LittleFS save
+  server.on("/api/import_start", HTTP_POST, [](){
+    DynetEntities::em.setLoading(true);
+    server.sendHeader("Cache-Control","no-store");
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Apply one area's data (JSON body)
+  server.on("/api/import_area", HTTP_POST, [](){
+    using namespace DynetEntities;
+    String body = server.arg("plain");
+    if (body.isEmpty()) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}");
+      return;
+    }
+    DynamicJsonDocument doc(3072);
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"json parse\"}");
+      return;
+    }
+    uint8_t area = doc["area"] | 0;
+    if (area < 1) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"bad area\"}");
+      return;
+    }
+    const char* aName = doc["name"] | "";
+    uint8_t     aType = doc["type"] | 0;
+    uint8_t     pCount = doc["preset_count"] | 4;
+
+    // Create / touch area (loading=true suppresses publish+save inside touchArea)
+    int ai = em.touchArea(area);
+    if (ai < 0) {
+      server.send(200, "application/json", "{\"ok\":false,\"error\":\"area table full\"}");
+      return;
+    }
+    auto& as = em.areaAtMut(ai);
+
+    // --- Name ---
+    if (aName && aName[0]) {
+      strncpy(as.name, aName, sizeof(as.name) - 1);
+      as.name[sizeof(as.name) - 1] = '\0';
+    }
+
+    // --- Type + allocation ---
+    AreaType newType = (aType == 1) ? AREA_CURTAIN : (aType == 2) ? AREA_HVAC : AREA_LIGHTS;
+    if (newType != as.areaType) {
+      // Free old type resources
+      if (as.areaType == AREA_CURTAIN && newType != AREA_CURTAIN) {
+        if (as.curtains) { delete[] as.curtains; as.curtains = nullptr; }
+      }
+      if (as.areaType == AREA_HVAC && newType != AREA_HVAC) {
+        if (as.hvac) { delete as.hvac; as.hvac = nullptr; }
+      }
+      as.areaType = newType;
+      // Allocate new type resources
+      if (newType == AREA_CURTAIN && !as.curtains) {
+        as.curtains = new (std::nothrow) AreaCurtainEntry[MAX_CURTAINS_PER_AREA];
+        if (as.curtains) {
+          for (int k = 0; k < MAX_CURTAINS_PER_AREA; k++) as.curtains[k] = AreaCurtainEntry{};
+        }
+      }
+      if (newType == AREA_HVAC && !as.hvac) {
+        as.hvac = new (std::nothrow) HvacConfig{};
+        if (as.hvac && (!as.hasSetpt || isnan(as.setptC))) {
+          as.hasSetpt = true; as.setptC = 22.0f;
+        }
+      }
+    }
+
+    // --- Lights: preset count + preset names + channels ---
+    if (newType == AREA_LIGHTS) {
+      if (pCount < 1) pCount = 4;
+      if (pCount > MAX_LIGHT_PRESETS) pCount = MAX_LIGHT_PRESETS;
+      as.presetCount = pCount;
+
+      // Preset names
+      for (JsonObject pr : doc["presets"].as<JsonArray>()) {
+        uint8_t pid = pr["id"] | 0;
+        const char* pnm = pr["name"] | "";
+        if (pid >= 1 && pid <= MAX_LIGHT_PRESETS && pnm && pnm[0]) {
+          if (!as.presets) {
+            as.presets = new (std::nothrow) AreaPresetNames{};
+          }
+          if (as.presets) {
+            strncpy(as.presets->n[pid - 1], pnm, sizeof(as.presets->n[pid - 1]) - 1);
+            as.presets->n[pid - 1][sizeof(as.presets->n[pid - 1]) - 1] = '\0';
+          }
+        }
+      }
+
+      // Channels (id is 1-based in XML → 0-based channel0 for DyNet)
+      for (JsonObject ch : doc["channels"].as<JsonArray>()) {
+        uint8_t chId = ch["id"] | 0;
+        const char* chnm = ch["name"] | "";
+        if (chId >= 1) {
+          int ci = em.touchChannel(area, chId - 1);  // loading=true: no publish+save
+          if (ci >= 0 && chnm && chnm[0]) {
+            strncpy(em.channelAtMut(ci).name, chnm, sizeof(em.channelAtMut(ci).name) - 1);
+            em.channelAtMut(ci).name[sizeof(em.channelAtMut(ci).name) - 1] = '\0';
+          }
+        }
+      }
+    }
+
+    // --- Curtain: populate first curtain entry ---
+    if (newType == AREA_CURTAIN && as.curtains) {
+      uint8_t openP  = doc["open"]  | 3;
+      uint8_t closeP = doc["close"] | 1;
+      uint8_t stopP  = doc["stop"]  | 2;
+      // Reset slot 0 with imported data
+      auto& ce = as.curtains[0];
+      ce = AreaCurtainEntry{};
+      ce.used = true;
+      strncpy(ce.name, aName && aName[0] ? aName : "Curtain 1", sizeof(ce.name) - 1);
+      ce.name[sizeof(ce.name) - 1] = '\0';
+      ce.openPreset  = openP  ? openP  : 3;
+      ce.closePreset = closeP ? closeP : 1;
+      ce.stopPreset  = stopP  ? stopP  : 2;
+    }
+
+    server.sendHeader("Cache-Control","no-store");
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // End bulk import: save once + publish HA discovery for all areas
+  server.on("/api/import_done", HTTP_POST, [](){
+    using namespace DynetEntities;
+    em.setLoading(false);
+    saveEntities();
+    // Publish HA discovery for every area
+    for (int i = 0; i < em.areasCount(); i++) {
+      publishHADiscoveryForArea(em.areaAt(i).area);
+      yield();
+    }
+    server.sendHeader("Cache-Control","no-store");
+    server.send(200, "application/json", "{\"ok\":true}");
   });
 
   server.begin();

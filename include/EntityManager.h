@@ -39,7 +39,7 @@ static constexpr uint8_t MAX_LIGHT_PRESETS = 16;  // max presets for AREA_LIGHTS
 
 // Preset name storage for AREA_LIGHTS (heap-allocated on demand)
 struct AreaPresetNames {
-  char n[MAX_LIGHT_PRESETS][24] = {};  // 16 × 24 = 384 bytes, allocated only when a name is set
+  char n[MAX_LIGHT_PRESETS][16] = {};  // 16 × 16 = 256 bytes, allocated only when a name is set
 };
 
 struct HvacConfig {
@@ -59,7 +59,7 @@ struct ChannelState {
   bool       present         = false;
   bool       isOn            = false;
   uint8_t    levelPct        = 0;    // 0..100 derived from reports
-  char       name[41]        = {};   // user label; empty = default "Area N Ch M"
+  char       name[24]        = {};   // user label; empty = default "Area N Ch M"
   // Curtain support
   bool       isCurtainSlave  = false;  // true = DOWN relay; hidden from UI & HA
   uint8_t    curtainTimeSec  = 30;     // travel time in seconds (master only, persisted)
@@ -70,12 +70,12 @@ struct ChannelState {
 // One named curtain within an AREA_CURTAIN-type area
 struct AreaCurtainEntry {
   bool    used        = false;
-  char    name[41]    = {};    // user label
+  char    name[24]    = {};    // user label
   uint8_t openPreset  = 1;    // 1-origin preset sent for OPEN
   uint8_t closePreset = 2;
   uint8_t stopPreset  = 3;
 };
-static constexpr uint8_t MAX_CURTAINS_PER_AREA = 32;
+static constexpr uint8_t MAX_CURTAINS_PER_AREA = 8;
 
 struct AreaState {
   uint8_t  area     = 0;   // 1..255
@@ -86,7 +86,7 @@ struct AreaState {
   bool     hasSetpt = false;
   float    setptC   = NAN;
   uint32_t lastLevelReqMs = 0;   // debounce refresh requests
-  char     name[41] = {};   // user label; empty = default "Area N"
+  char     name[24] = {};   // user label; empty = default "Area N"
   uint8_t  presetCount = 4; // 1..128, number of presets exposed to HA for this area
   // Area-type / virtual curtains
   AreaType         areaType = AREA_LIGHTS;
@@ -97,11 +97,17 @@ struct AreaState {
   AreaPresetNames*  presets   = nullptr; // heap-allocated preset names for AREA_LIGHTS, nullptr otherwise
 };
 
+// Hard limits — config values are clamped to these at runtime.
+// On ESP8266: keep low to protect heap. On ESP32: can be raised via build flags.
 #ifndef DYNET_MAX_CHANNELS
-#define DYNET_MAX_CHANNELS 32  // was 128
+#  define DYNET_MAX_CHANNELS 8    // channels probed per area during sweep
 #endif
 #ifndef DYNET_MAX_AREAS
-#define DYNET_MAX_AREAS 32
+#  if defined(ESP8266)
+#    define DYNET_MAX_AREAS 32    // hard cap for ESP8266 (limited RAM)
+#  else
+#    define DYNET_MAX_AREAS 255   // ESP32 — no practical limit
+#  endif
 #endif
 
 class EntityManager {
@@ -196,13 +202,15 @@ public:
   void setLoading(bool v) { _loading = v; }
 
 private:
-  bool          _loading  = false;
-  //ChannelState _channels[DYNET_MAX_CHANNELS];
-  //AreaState    _areas[DYNET_MAX_AREAS];
-  ChannelState* _channels = nullptr;
-  AreaState*    _areas    = nullptr;
-  int           _chCount = 0, _arCount = 0;
-  int           _chCap   = 0, _arCap   = 0;    // NEW
+  bool          _loading   = false;
+  ChannelState* _channels  = nullptr;
+  AreaState*    _areas     = nullptr;
+  int           _chCount   = 0, _arCount   = 0;  // used slots
+  int           _chCap     = 0, _arCap     = 0;  // user limit (from config)
+  int           _chAlloced = 0, _arAlloced = 0;  // actually allocated (lazy, grows on demand)
+
+  bool growAreaArray();     // allocate more AreaState slots (up to _arCap)
+  bool growChannelArray();  // allocate more ChannelState slots (up to _chCap)
 
 // (public:)
 inline int maxChannels() const { return _chCap; }

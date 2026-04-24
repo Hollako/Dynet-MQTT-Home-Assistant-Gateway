@@ -24,27 +24,75 @@ static float fp_toC(uint8_t hi, uint8_t lo) {
 }
 
 void EntityManager::begin() {
+  // Free channel array (no heap pointers inside ChannelState)
   if (_channels) { delete[] _channels; _channels = nullptr; }
+  // Free area array — must null per-area heap pointers first to avoid double-free
   if (_areas) {
-    // Free per-area heap pointers before releasing the area slab
-    for (int i = 0; i < _arCap; i++) {
+    for (int i = 0; i < _arAlloced; i++) {
       if (_areas[i].curtains) { delete[] _areas[i].curtains; _areas[i].curtains = nullptr; }
       if (_areas[i].hvac)     { delete   _areas[i].hvac;     _areas[i].hvac     = nullptr; }
+      if (_areas[i].presets)  { delete   _areas[i].presets;  _areas[i].presets  = nullptr; }
     }
     delete[] _areas; _areas = nullptr;
   }
 
-  int chCap = cfg.dynet_max_channels ? constrain((int)cfg.dynet_max_channels, 1, (int)DYNET_MAX_CHANNELS) : DYNET_MAX_CHANNELS;
-  int arCap = cfg.dynet_max_areas    ? constrain((int)cfg.dynet_max_areas,    1, (int)DYNET_MAX_AREAS)    : DYNET_MAX_AREAS;
+  // dynet_max_channels = channels probed per area during sweep
+  // dynet_max_areas    = area storage cap + sweep upper limit
+  int chPerArea = cfg.dynet_max_channels
+                  ? constrain((int)cfg.dynet_max_channels, 1, (int)DYNET_MAX_CHANNELS)
+                  : DYNET_MAX_CHANNELS;
+  int arCap     = cfg.dynet_max_areas
+                  ? constrain((int)cfg.dynet_max_areas, 1, (int)DYNET_MAX_AREAS)
+                  : DYNET_MAX_AREAS;
+  // Total channel pool = areas × channels-per-area.
+  // Capped at 200 on ESP8266 (limited heap), 2000 on ESP32.
+#if defined(ESP8266)
+  int chCap = constrain(arCap * chPerArea, 1, 200);
+#else
+  int chCap = constrain(arCap * chPerArea, 1, 2000);
+#endif
 
-  _channels = new (std::nothrow) ChannelState[chCap];
-  if (_channels) { for (int i = 0; i < chCap; i++) _channels[i] = ChannelState{}; }
-  _areas    = new (std::nothrow) AreaState   [arCap];
-  if (_areas)    { for (int i = 0; i < arCap; i++) _areas[i]    = AreaState{};    }
+  // Start with NO pre-allocation — arrays grow lazily as areas/channels are discovered.
+  // This means a device with 3 areas uses only 3 × sizeof(AreaState) instead of
+  // arCap × sizeof(AreaState). Slots are allocated in doubling chunks.
   _chCount = 0; _arCount = 0;
-  _chCap   = chCap; _arCap = arCap;       // NEW: remember capacities
+  _chCap   = chCap; _arCap = arCap;
+  _chAlloced = 0; _arAlloced = 0;
 }
 
+// Grow the area array by doubling (up to _arCap). Returns false on OOM.
+bool EntityManager::growAreaArray() {
+  int newSize = (_arAlloced == 0) ? 4 : min(_arAlloced * 2, _arCap);
+  if (newSize <= _arAlloced) return false;
+  AreaState* n = new (std::nothrow) AreaState[newSize];
+  if (!n) return false;
+  // Copy existing slots; null heap-pointers in OLD array to prevent double-free on delete
+  for (int i = 0; i < _arCount; i++) {
+    n[i] = _areas[i];
+    _areas[i].curtains = nullptr;
+    _areas[i].hvac     = nullptr;
+    _areas[i].presets  = nullptr;
+  }
+  for (int i = _arCount; i < newSize; i++) n[i] = AreaState{};
+  delete[] _areas;
+  _areas = n;
+  _arAlloced = newSize;
+  return true;
+}
+
+// Grow the channel array by doubling (up to _chCap). Returns false on OOM.
+bool EntityManager::growChannelArray() {
+  int newSize = (_chAlloced == 0) ? 8 : min(_chAlloced * 2, _chCap);
+  if (newSize <= _chAlloced) return false;
+  ChannelState* n = new (std::nothrow) ChannelState[newSize];
+  if (!n) return false;
+  for (int i = 0; i < _chCount; i++) n[i] = _channels[i];
+  for (int i = _chCount; i < newSize; i++) n[i] = ChannelState{};
+  delete[] _channels;
+  _channels = n;
+  _chAlloced = newSize;
+  return true;
+}
 
 int EntityManager::findArea(uint8_t area) const {
   for (int i = 0; i < _arCount; i++) if (_areas[i].area == area) return i;
@@ -54,6 +102,7 @@ int EntityManager::touchArea(uint8_t area) {
   int idx = findArea(area);
   if (idx >= 0) { _areas[idx].present = true; return idx; }
   if (_arCount >= _arCap) return -1;
+  if (_arCount >= _arAlloced && !growAreaArray()) return -1;  // OOM
   _areas[_arCount] = AreaState{};
   _areas[_arCount].area = area;
   _areas[_arCount].present = true;
@@ -75,6 +124,7 @@ int EntityManager::touchChannel(uint8_t area, uint8_t channel0) {
   int idx = findChannel(area, channel0);
   if (idx >= 0) { _channels[idx].present = true; return idx; }
   if (_chCount >= _chCap) return -1;
+  if (_chCount >= _chAlloced && !growChannelArray()) return -1;  // OOM
   _channels[_chCount] = ChannelState{};
   _channels[_chCount].present  = true;
   _channels[_chCount].area     = area;
@@ -418,8 +468,10 @@ void EntityManager::setChannelName(uint8_t area, uint8_t channel0, const char* n
   if (idx < 0) return;
   strncpy(_channels[idx].name, name ? name : "", sizeof(_channels[idx].name) - 1);
   _channels[idx].name[sizeof(_channels[idx].name) - 1] = '\0';
-  publishHADiscoveryForChannel(idx);  // update HA entity name
-  saveEntities();
+  if (!_loading) {
+    publishHADiscoveryForChannel(idx);  // update HA entity name
+    saveEntities();
+  }
 }
 
 void EntityManager::setAreaName(uint8_t area, const char* name) {
@@ -427,8 +479,10 @@ void EntityManager::setAreaName(uint8_t area, const char* name) {
   if (idx < 0) return;
   strncpy(_areas[idx].name, name ? name : "", sizeof(_areas[idx].name) - 1);
   _areas[idx].name[sizeof(_areas[idx].name) - 1] = '\0';
-  publishHADiscoveryForArea(area);    // update HA entity names
-  saveEntities();
+  if (!_loading) {
+    publishHADiscoveryForArea(area);    // update HA entity names
+    saveEntities();
+  }
 }
 
 void EntityManager::setPresetName(uint8_t area, uint8_t preset1, const char* name) {
@@ -440,10 +494,12 @@ void EntityManager::setPresetName(uint8_t area, uint8_t preset1, const char* nam
     as.presets = new (std::nothrow) AreaPresetNames{};
     if (!as.presets) return;
   }
-  strncpy(as.presets->n[preset1 - 1], name ? name : "", 23);
-  as.presets->n[preset1 - 1][23] = '\0';
-  publishHADiscoveryForArea(area);  // republish preset select with updated names
-  saveEntities();
+  strncpy(as.presets->n[preset1 - 1], name ? name : "", sizeof(as.presets->n[preset1 - 1]) - 1);
+  as.presets->n[preset1 - 1][sizeof(as.presets->n[preset1 - 1]) - 1] = '\0';
+  if (!_loading) {
+    publishHADiscoveryForArea(area);  // republish preset select with updated names
+    saveEntities();
+  }
 }
 
 bool EntityManager::deleteArea(uint8_t area) {
@@ -618,9 +674,11 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
     }
   }
   // Wipe all stale HA entities for this area then publish the correct new ones
-  removeHADiscoveryForArea(area);
-  publishHADiscoveryForArea(area);
-  saveEntities();
+  if (!_loading) {
+    removeHADiscoveryForArea(area);
+    publishHADiscoveryForArea(area);
+    saveEntities();
+  }
 }
 
 int EntityManager::addAreaCurtain(uint8_t area) {

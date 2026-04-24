@@ -14,6 +14,11 @@ extern DynetBus dynet;
 namespace DynetEntities { extern EntityManager em; }
 
 bool loadConfig() {
+  // Safe defaults before parsing — ensures correct behaviour on first boot
+  // or when a key is absent from an older config.json.
+  cfg.ha_discovery = true;
+  cfg.log_web      = false;
+
   if (!LittleFS.exists(CONFIG_FILE)) return false;
   File f = LittleFS.open(CONFIG_FILE, "r"); if (!f) return false;
 
@@ -30,6 +35,8 @@ bool loadConfig() {
   if (doc.containsKey("mqtt_user"))    setStr(cfg.mqtt_user, sizeof(cfg.mqtt_user), String((const char*)doc["mqtt_user"]));
   if (doc.containsKey("mqtt_pass"))    setStr(cfg.mqtt_pass, sizeof(cfg.mqtt_pass), String((const char*)doc["mqtt_pass"]));
   if (doc.containsKey("ha_discovery")) cfg.ha_discovery = (bool)doc["ha_discovery"];
+  if (doc.containsKey("log_web"))     cfg.log_web      = (bool)doc["log_web"];
+  else cfg.log_web = false; // default OFF — enable in Config page when needed
 
   // RS485 pins & mode (optional; -1 means not used)
   if (doc.containsKey("tx_pin")) txPin = sanitizeGpio((int)doc["tx_pin"]);
@@ -59,6 +66,7 @@ bool saveConfig() {
   doc["mqtt_user"]    = cfg.mqtt_user;
   doc["mqtt_pass"]    = cfg.mqtt_pass;
   doc["ha_discovery"] = cfg.ha_discovery;
+  doc["log_web"]      = cfg.log_web;
 
   doc["tx_pin"] = txPin;
   doc["rx_pin"] = rxPin;
@@ -82,9 +90,21 @@ bool loadEntities() {
   if (!LittleFS.exists(ENTITIES_FILE)) return false;
   File f = LittleFS.open(ENTITIES_FILE, "r"); if (!f) return false;
 
-  DynamicJsonDocument doc(8192);   // bumped: curtains array adds ~200 bytes per curtain area
+  // ESP32 can have 255 areas — needs a large pool.
+  // ESP8266 (D1 Mini @ 160 MHz): DYNET_MAX_AREAS raised to 128; pool raised to 24 KB.
+  // ArduinoJson internal tree overhead is ~3× the serialised JSON size.
+  // 24 KB covers ~87 areas + ~300 channels with headroom; heap spike is temporary.
+#if defined(ESP32)
+  DynamicJsonDocument doc(65536);
+#else
+  DynamicJsonDocument doc(24576);
+#endif
   DeserializationError err = deserializeJson(doc, f, DeserializationOption::NestingLimit(8));
-  f.close(); if (err) return false;
+  f.close();
+  if (err) {
+    LOGF("[persist] loadEntities failed: %s\n", err.c_str());
+    return false;
+  }
 
   em.begin();
   em.setLoading(true);   // suppress publish/save inside touchArea/touchChannel
@@ -151,8 +171,8 @@ bool loadEntities() {
               for (JsonVariant pv : v["pnames"].as<JsonArray>()) {
                 if (pi >= DynetEntities::MAX_LIGHT_PRESETS) break;
                 if (pv.is<const char*>() && pv.as<const char*>()[0]) {
-                  strncpy(ar.presets->n[pi], pv.as<const char*>(), 23);
-                  ar.presets->n[pi][23] = '\0';
+                  strncpy(ar.presets->n[pi], pv.as<const char*>(), sizeof(ar.presets->n[pi]) - 1);
+                  ar.presets->n[pi][sizeof(ar.presets->n[pi]) - 1] = '\0';
                 }
                 pi++;
               }
@@ -249,6 +269,9 @@ bool loadEntities() {
     }
   }
   em.setLoading(false);  // re-enable publish/save
+  if (doc.overflowed()) {
+    LOGF("[persist] WARNING: JSON doc overflowed during load — some entities may be missing! Increase capacity.\n");
+  }
   LOGF("[persist] loaded %d channels, %d areas from %s\n", em.channelsCount(), em.areasCount(), ENTITIES_FILE);
   return true;
 }
@@ -257,7 +280,12 @@ bool saveEntities() {
   using namespace DynetEntities;
   File f = LittleFS.open(ENTITIES_FILE, "w"); if (!f) return false;
 
-  DynamicJsonDocument doc(8192);
+  // Same sizing rationale as loadEntities()
+#if defined(ESP32)
+  DynamicJsonDocument doc(65536);
+#else
+  DynamicJsonDocument doc(24576);
+#endif
 
   // channels
   JsonArray chs = doc.createNestedArray("channels");
@@ -335,8 +363,14 @@ bool saveEntities() {
     }
   }
 
-  String out; serializeJson(doc, out);
-  size_t n = f.print(out); f.flush(); f.close();
+  // Serialize directly to the file — avoids a full String copy on heap.
+  size_t n = serializeJson(doc, f);
+  f.flush(); f.close();
+  if (doc.overflowed()) {
+    LOGF("[persist] saveEntities: JSON doc overflowed! Increase doc capacity.\n");
+  }
+  LOGF("[persist] saveEntities: wrote %u bytes, ch=%d areas=%d\n",
+       (unsigned)n, em.channelsCount(), em.areasCount());
   return (n > 0);
 }
 

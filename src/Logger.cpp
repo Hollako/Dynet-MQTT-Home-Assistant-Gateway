@@ -8,12 +8,14 @@ static Print* s_logSerial = nullptr;
 
 // --- Implementation ---
 void log_put_raw(const char* s) {
-  logBuffer += s;
-  logSeq++;
-  if (logBuffer.length() > 4096) {
-    logBuffer.remove(0, logBuffer.length() - 2048);
+  if (cfg.log_web) {
+    logBuffer += s;
+    logSeq++;
+    if (logBuffer.length() > 2048) {
+      logBuffer.remove(0, logBuffer.length() - 1024);
+    }
   }
-  if (s_logSerial) s_logSerial->print(s);
+  if (s_logSerial) s_logSerial->print(s);  // Serial always active regardless of flag
 }
 
 void logf(const char* fmt, ...) {

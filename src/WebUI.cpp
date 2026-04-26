@@ -1,4 +1,4 @@
-#include "Globals.h"
+﻿#include "Globals.h"
 #include "ConfigStore.h"
 #include "MqttManager.h"
 #include "DynetBus.h"
@@ -30,9 +30,9 @@ extern HttpServer server;
 // Forward declarations for the firmware page handlers (still file scope)
 static void handleFwGet();
 static void handleFwUpload();
+static void handleFwSetPending();
 static void handleFwCheckUpdate();
 static void handleFwDoUpdate();
-static void handleNetCheck();
 
 // Expose the route registrar (Call this from registerWebRoutes)
 void registerFwRoutes();
@@ -89,6 +89,7 @@ static inline void pageBegin(const String& title) {
       "button.prog{border:1px solid #d39e00;background:rgba(255,193,7,.16);color:#d39e00;border-radius:6px;padding:6px 16px;min-height:32px;font-size:14px;}"
       "button.action{border:1px solid #6c757d;background:rgba(108,117,125,.16);color:#6c757d;border-radius:6px;padding:6px 16px; min-height:32px;font-size:14px;}"
       ".card{border:1px solid var(--border);border-radius:12px;padding:12px;margin:14px 0;background:var(--card)}"
+      ".icon-btn:hover{filter:brightness(.92)}"
 
       "</style>"
       "<script>"
@@ -110,13 +111,13 @@ static inline void pageBegin(const String& title) {
         "if(a) a.textContent = b.ap_active ? ('AP: '+(b.ap_ssid||'')) : 'AP: Off';"
       "}"
       "function poll(){fetch('/status',{cache:'no-store'}).then(r=>r.json()).then(upd).catch(()=>{});} "
+      "var _sunSvg='<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"5\"></circle><line x1=\"12\" y1=\"1\" x2=\"12\" y2=\"3\"></line><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"23\"></line><line x1=\"4.22\" y1=\"4.22\" x2=\"5.64\" y2=\"5.64\"></line><line x1=\"18.36\" y1=\"18.36\" x2=\"19.78\" y2=\"19.78\"></line><line x1=\"1\" y1=\"12\" x2=\"3\" y2=\"12\"></line><line x1=\"21\" y1=\"12\" x2=\"23\" y2=\"12\"></line><line x1=\"4.22\" y1=\"19.78\" x2=\"5.64\" y2=\"18.36\"></line><line x1=\"18.36\" y1=\"5.64\" x2=\"19.78\" y2=\"4.22\"></line></svg>';"
+      "var _moonSvg='<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"></path></svg>';"
       "function applyTheme(){"
         "var dark=localStorage.dark==='1';"
         "document.body.classList.toggle('dark',dark);"
         "var b=document.getElementById('themeBtn');"
-        "if(b)b.innerHTML=dark"
-          "?'\u2600'"  // ☀ sun — no rotation
-          ":'<span style=\"display:inline-block;transform:rotate(130deg)\">\u263D</span>';"  // ☽ moon — rotated
+        "if(b)b.innerHTML=dark?_sunSvg:_moonSvg;"
       "}"
       "function toggleDark(){localStorage.dark=(localStorage.dark==='1'?'0':'1');applyTheme();}"
       "window.addEventListener('DOMContentLoaded',()=>{applyTheme();poll();setInterval(poll,2000);});"
@@ -133,16 +134,34 @@ static inline void pageBegin(const String& title) {
   server.sendContent(deviceId);
   server.sendContent(
     F("</strong><div class='sp'></div>"
-      "<a class='btn nicn' href='/' title='Home'><span style='font-size:28px;line-height:1;display:inline-block;transform:translateY(-3px)'>&#x2302;</span></a>"
-      "<a class='btn nicn' href='/config' title='Configuration'>&#x2699;</a>"));
-  if (cfg.log_web) server.sendContent(F("<a class='btn nicn' href='/logs' title='Logs'>&#x2630;</a>"));
+      "<a class='btn nicn icon-btn' href='/' title='Home'>"
+        "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>"
+          "<path d='M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9.5z'/>"
+          "<path d='M9 21V12h6v9'/>"
+        "</svg>"
+      "</a>"
+      "<a class='btn nicn icon-btn' href='/config' title='Configuration'>"
+        "<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+          "<circle cx='12' cy='12' r='3'></circle>"
+          "<path d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z'></path>"
+        "</svg>"
+      "</a>"));
+  if (cfg.log_web) server.sendContent(F("<a class='btn nicn icon-btn' href='/logs' title='Logs'>&#x2630;</a>"));
   server.sendContent(
-    F("<a class='btn nicn' href='/fw' title='Firmware Update'>&#x2B06;</a>"
-      "<button class='btn nicn' id='themeBtn' onclick='toggleDark()' title='Toggle theme'>"
-        "<span style='display:inline-block;transform:rotate(130deg)'>&#x263D;</span>"
+    F("<a class='btn nicn icon-btn' href='/fw' title='Firmware Update'>"
+        "<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+          "<polyline points='16 16 12 12 8 16'></polyline>"
+          "<line x1='12' y1='12' x2='12' y2='21'></line>"
+          "<path d='M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3'></path>"
+        "</svg>"
+      "</a>"
+      "<button class='btn nicn icon-btn' id='themeBtn' onclick='toggleDark()' title='Toggle theme'>"
+        "<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+          "<path d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'></path>"
+        "</svg>"
       "</button>"
-      "<button class='btn nicn' title='Reboot Device' style='color:#e74c3c' "
-              "onclick='if(confirm(\"Reboot the device?\"))fetch(\"/reboot\",{method:\"GET\"}).then(()=>{})'>&#x21BB;</button>"
+      "<button class='btn nicn icon-btn' title='Reboot Device' style='color:#e74c3c' "
+              "onclick='if(confirm(\"Reboot the device?\"))window.location.href=\"/reboot\"'>&#x21BB;</button>"
 
     "</div><div class='container'>")
   );
@@ -161,7 +180,7 @@ static inline void pageBegin(const String& title) {
   server.sendContent(F("</div></div>"));
 }
 static inline void pageWrite(const __FlashStringHelper* s){ server.sendContent(s); }
-static inline void pageWrite(const String& s){ server.sendContent(s); }
+static inline void pageWrite(const String& s){ if(s.length()) server.sendContent(s); }
 static inline void pageEnd(){ server.sendContent(F("</div></body></html>")); }
 
 // Safe helper: convert a fixed-length name buffer to an HTML-attribute-safe String.
@@ -1018,9 +1037,11 @@ void handleConfigGet() {
   uint8_t defAr = cfg.dynet_max_areas ? cfg.dynet_max_areas : (uint8_t)DYNET_MAX_AREAS;
 
   pageWrite(F("<div>DyNet Max Channels</div><div>"
-              "<input class='in' name='dynet_max_channels' type='number' min='1' max='32' value='"));
+              "<input class='in' name='dynet_max_channels' type='number' min='1' max='"));
+  pageWrite(String((int)DYNET_MAX_CHANNELS));  // enforced by compile-time cap (16 on ESP8266, 8 default)
+  pageWrite(F("' value='"));
   pageWrite(String(defCh));
-  pageWrite(F("'><div class='muted'>Channels probed per area during sweep (e.g. 8 = check channels 1&ndash;8 in every area).</div></div>"));
+  pageWrite(F("'><div class='muted'>Channels probed per area during sweep (e.g. 16 = check channels 1&ndash;16 in every area).</div></div>"));
 
   pageWrite(F("<div>DyNet Max Areas</div><div>"
               "<input class='in' name='dynet_max_areas' type='number' min='2' max='"));
@@ -1053,7 +1074,7 @@ void handleConfigGet() {
   // Wi-Fi
   pageWrite(F("<div class='card'><div class='form-table'>"));
   pageWrite(F("<div>Wi‑Fi SSID (STA)</div><div>"
-              "<input class='in' id='staSsid' name='wifi_ssid' type='text' value='"));
+              "<input class='in' id='staSsid' name='wifi_ssid' type='text' required value='"));
   pageWrite(String(cfg.wifi_ssid));
   pageWrite(F("'> <select class='in' id='ssidSelect'><option value=''> Select from scan </option></select>"
               " <button id='scanBtn' class='btn' type='button' onclick='doScan()'>Scan</button>"
@@ -1063,8 +1084,15 @@ void handleConfigGet() {
   pageWrite(String(cfg.wifi_pass));
   pageWrite(F("'></div>"));
 
+  pageWrite(F("<div>Fallback SSID</div><div><input class='in' name='wifi_ssid2' type='text' placeholder='optional' value='"));
+  pageWrite(String(cfg.wifi_ssid2));
+  pageWrite(F("'></div>"));
+  pageWrite(F("<div>Fallback Password</div><div><input class='in' name='wifi_pass2' type='password' value='"));
+  pageWrite(String(cfg.wifi_pass2));
+  pageWrite(F("'></div>"));
+
   // AP
-  pageWrite(F("<div>AP SSID</div><div><input class='in' name='ap_ssid' type='text' value='"));
+  pageWrite(F("<div>AP SSID</div><div><input class='in' name='ap_ssid' type='text' required value='"));
   pageWrite(apSsid);
   pageWrite(F("'></div>"));
   pageWrite(F("<div>AP Password</div><div><input class='in' name='ap_pass' type='password' value='"));
@@ -1075,10 +1103,10 @@ void handleConfigGet() {
 
   // MQTT
   pageWrite(F("<div class='card'><div class='form-table'>"));
-  pageWrite(F("<div>MQTT Server</div><div><input class='in' name='mqtt_server' type='text' value='"));
+  pageWrite(F("<div>MQTT Server</div><div><input class='in' name='mqtt_server' type='text' required value='"));
   if (mqtt.connected()) pageWrite(String(cfg.mqtt_server));
   pageWrite(F("'></div>"));
-  pageWrite(F("<div>MQTT Port</div><div><input class='in' name='mqtt_port' type='number' value='"));
+  pageWrite(F("<div>MQTT Port</div><div><input class='in' name='mqtt_port' type='number' required min='1' max='65535' value='"));
   if (mqtt.connected()) pageWrite(String(cfg.mqtt_port));
   pageWrite(F("'></div>"));
   pageWrite(F("<div>MQTT User</div><div><input class='in' name='mqtt_user' type='text' value='"));
@@ -1155,36 +1183,15 @@ void handleConfigGet() {
   pageEnd();
 }
 
-void sendRebootingPage(const char* title, const char* msg, int seconds, int delayMs) {
-  if (seconds < 0) seconds = 0;
-  // Show a friendly page and auto-redirect to /
-  pageBegin(title ? title : "Rebooting");
-  pageWrite(F("<div class='card'>"));
-    pageWrite(F("<div class='title'>"));
-      pageWrite(title ? String(title) : String("Rebooting"));
-    pageWrite(F("</div>"));
-
-    pageWrite(F("<p>"));
-      if (msg && *msg) pageWrite(String(msg));
-      else             pageWrite(F("Device will restart to apply changes."));
-    pageWrite(F("</p>"));
-
-    pageWrite(F("<p>Redirecting to <code>/</code> in "));
-      pageWrite(String(seconds));
-      pageWrite(F("s…</p>"));
-
-    pageWrite(F("<a class='btn' href='/'>Go now</a>"));
-  pageWrite(F("</div>"));
-
-  // Meta refresh
-  pageWrite(String("<meta http-equiv='refresh' content='") + seconds + ";url=/'/>");
-
-  pageEnd();
-
-  // If you already call scheduleReboot() separately at call sites, do nothing here.
-  // If you prefer this function to *also* schedule the reboot, uncomment the next line:
-  // scheduleReboot(delayMs);
-  (void)delayMs; // keep signature; caller may still use its own scheduleReboot()
+void sendRebootingPage(const char* title, const char* msg, int seconds, int /*delayMs*/) {
+  // Delegate to the String overload which has JS countdown + /status polling.
+  // All callers (config save, firmware update, restore) get consistent behaviour.
+  sendRebootingPage(
+    String(title && *title ? title : "Rebooting"),
+    String(msg   && *msg   ? msg   : "Device will restart to apply changes."),
+    seconds < 0 ? 0 : seconds,
+    5000U   // start polling /status after 5 s
+  );
 }
 
 
@@ -1452,331 +1459,230 @@ static int    gCheckResult = 0;
 static String gCheckError;
 
 
-static bool hostReachable(const char* host, uint16_t port, uint32_t timeoutMs, String& outErr) {
-  WiFiClient client;
-  // Stream/WiFiClient timeout is in milliseconds; keep the caller-provided value.
-  client.setTimeout(timeoutMs);
-#if defined(ESP8266)
-  bool ok = client.connect(host, port);
-#else
-  bool ok = client.connect(host, port, timeoutMs);
-#endif
-  if (!ok) {
-    const int errNo = errno;
-    outErr = String("TCP connect failed to ") + host + ":" + String(port);
-    if (errNo != 0) outErr += String(" errno=") + String(errNo);
-    return false;
+
+static void handleFwSetPending() {
+  String url = server.arg("url");
+  String tag = server.arg("tag");
+  if (url.length() && tag.length()) {
+    gPendingUpdateUrl  = url;
+    gPendingUpdateTag  = tag;
+    gPendingUpdateSize = 0;
   }
-  client.stop();
-  return true;
-}
-
-static bool hostReachableIp(const IPAddress& ip, uint16_t port, uint32_t timeoutMs, String& outErr) {
-  WiFiClient client;
-  // Stream/WiFiClient timeout is in milliseconds; keep the caller-provided value.
-  client.setTimeout(timeoutMs);
-#if defined(ESP8266)
-  bool ok = client.connect(ip, port);
-#else
-  bool ok = client.connect(ip, port, timeoutMs);
-#endif
-  if (!ok) {
-    const int errNo = errno;
-    outErr = String("TCP connect failed to ") + ip.toString() + ":" + String(port);
-    if (errNo != 0) outErr += String(" errno=") + String(errNo);
-    return false;
-  }
-  client.stop();
-  return true;
-}
-
-static bool resolveHost(const char* host, IPAddress& outIp, String& outErr) {
-  if (WiFi.hostByName(host, outIp)) return true;
-  outErr = String("DNS resolve failed for ") + host;
-  return false;
-}
-
-static void handleNetCheck() {
-  DynamicJsonDocument doc(3072);
-  doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
-  doc["sta_ssid"] = WiFi.SSID();
-  doc["sta_ip"] = WiFi.localIP().toString();
-  doc["gateway"] = WiFi.gatewayIP().toString();
-#if defined(ESP8266)
-  doc["dns1"] = WiFi.dnsIP().toString();
-#else
-  doc["dns1"] = WiFi.dnsIP(0).toString();
-  doc["dns2"] = WiFi.dnsIP(1).toString();
-#endif
-
-  String err;
-  IPAddress ip;
-  bool googleDns = resolveHost("google.com", ip, err);
-  doc["dns_google_ok"] = googleDns;
-  doc["dns_google_ip"] = googleDns ? ip.toString() : "";
-  if (!googleDns) doc["dns_google_err"] = err;
-
-  err = "";
-  bool githubDns = resolveHost("api.github.com", ip, err);
-  doc["dns_github_ok"] = githubDns;
-  doc["dns_github_ip"] = githubDns ? ip.toString() : "";
-  if (!githubDns) doc["dns_github_err"] = err;
-
-  err = "";
-  bool googleTcp = hostReachable("google.com", 443, 5000, err);
-  doc["tcp_google_443_ok"] = googleTcp;
-  if (!googleTcp) doc["tcp_google_443_err"] = err;
-
-  err = "";
-  bool githubTcp = hostReachable("api.github.com", 443, 5000, err);
-  doc["tcp_github_443_ok"] = githubTcp;
-  if (!githubTcp) doc["tcp_github_443_err"] = err;
-
-  const String gateway = doc["gateway"].as<String>();
-  err = "";
-  bool gateway80 = hostReachable(gateway.c_str(), 80, 3000, err);
-  doc["tcp_gateway_80_ok"] = gateway80;
-  if (!gateway80) doc["tcp_gateway_80_err"] = err;
-
-  err = "";
-  bool gateway53 = hostReachable(gateway.c_str(), 53, 3000, err);
-  doc["tcp_gateway_53_ok"] = gateway53;
-  if (!gateway53) doc["tcp_gateway_53_err"] = err;
-
-  err = "";
-  bool githubIpTcp = hostReachable("140.82.121.5", 443, 5000, err);
-  doc["tcp_github_ip_443_ok"] = githubIpTcp;
-  if (!githubIpTcp) doc["tcp_github_ip_443_err"] = err;
-
-  err = "";
-  bool example80 = hostReachable("example.com", 80, 5000, err);
-  doc["tcp_example_80_ok"] = example80;
-  if (!example80) doc["tcp_example_80_err"] = err;
-
-  err = "";
-  IPAddress githubV4Ip;
-  bool githubV4Dns = resolveHost("api.github.com", githubV4Ip, err);
-  doc["dns_github_ipv4_ok"] = githubV4Dns;
-  doc["dns_github_ipv4_ip"] = githubV4Dns ? githubV4Ip.toString() : "";
-  if (!githubV4Dns) doc["dns_github_ipv4_err"] = err;
-
-  bool githubV4Tcp = false;
-  err = "";
-  if (githubV4Dns) {
-    githubV4Tcp = hostReachableIp(githubV4Ip, 443, 5000, err);
-  } else {
-    err = "Skipped IPv4-only TCP check because DNS resolution failed.";
-  }
-  doc["tcp_github_ipv4_443_ok"] = githubV4Tcp;
-  if (!githubV4Tcp) doc["tcp_github_ipv4_443_err"] = err;
-
-#if defined(ESP32) || defined(ESP8266)
-  doc["free_heap"] = ESP.getFreeHeap();
-#endif
-  doc["open_sockets_info"] = "Runtime open socket count is not exposed by Arduino WiFiClient API.";
-
-  String dnsGoogleErr = String(doc["dns_google_err"] | "");
-  String dnsGithubErr = String(doc["dns_github_err"] | "");
-  String tcpGoogleErr = String(doc["tcp_google_443_err"] | "");
-  String tcpGithubErr = String(doc["tcp_github_443_err"] | "");
-  String dnsGoogleSuffix = googleDns ? "" : String(" err=") + dnsGoogleErr;
-  String dnsGithubSuffix = githubDns ? "" : String(" err=") + dnsGithubErr;
-  String tcpGoogleSuffix = googleTcp ? "" : String(" err=") + tcpGoogleErr;
-  String tcpGithubSuffix = githubTcp ? "" : String(" err=") + tcpGithubErr;
-  String tcpGateway80Suffix = gateway80 ? "" : String(" err=") + String(doc["tcp_gateway_80_err"] | "");
-  String tcpGateway53Suffix = gateway53 ? "" : String(" err=") + String(doc["tcp_gateway_53_err"] | "");
-  String tcpGithubIpSuffix = githubIpTcp ? "" : String(" err=") + String(doc["tcp_github_ip_443_err"] | "");
-  String tcpExample80Suffix = example80 ? "" : String(" err=") + String(doc["tcp_example_80_err"] | "");
-  String tcpGithubV4Suffix = githubV4Tcp ? "" : String(" err=") + String(doc["tcp_github_ipv4_443_err"] | "");
-
-  LOGF("[NETCHECK] wifi=%s ssid='%s' ip=%s gw=%s dns1=%s\n",
-       doc["wifi_connected"].as<bool>() ? "ok" : "down",
-       doc["sta_ssid"].as<const char*>(),
-       doc["sta_ip"].as<const char*>(),
-       doc["gateway"].as<const char*>(),
-       doc["dns1"].as<const char*>());
-  LOGF("[NETCHECK] dns google=%s ip=%s%s\n",
-       googleDns ? "ok" : "fail",
-       doc["dns_google_ip"].as<const char*>(),
-       dnsGoogleSuffix.c_str());
-  LOGF("[NETCHECK] dns github=%s ip=%s%s\n",
-       githubDns ? "ok" : "fail",
-       doc["dns_github_ip"].as<const char*>(),
-       dnsGithubSuffix.c_str());
-  LOGF("[NETCHECK] tcp google:443=%s%s\n",
-       googleTcp ? "ok" : "fail",
-       tcpGoogleSuffix.c_str());
-  LOGF("[NETCHECK] tcp api.github.com:443=%s%s\n",
-       githubTcp ? "ok" : "fail",
-       tcpGithubSuffix.c_str());
-  LOGF("[NETCHECK] tcp gateway:80=%s%s\n",
-       gateway80 ? "ok" : "fail",
-       tcpGateway80Suffix.c_str());
-  LOGF("[NETCHECK] tcp gateway:53=%s%s\n",
-       gateway53 ? "ok" : "fail",
-       tcpGateway53Suffix.c_str());
-  LOGF("[NETCHECK] tcp github-ip:443=%s%s\n",
-       githubIpTcp ? "ok" : "fail",
-       tcpGithubIpSuffix.c_str());
-  LOGF("[NETCHECK] tcp example.com:80=%s%s\n",
-       example80 ? "ok" : "fail",
-       tcpExample80Suffix.c_str());
-  LOGF("[NETCHECK] tcp api.github.com(v4):443=%s%s\n",
-       githubV4Tcp ? "ok" : "fail",
-       tcpGithubV4Suffix.c_str());
-
-  server.sendHeader("Cache-Control", "no-store");
-  String out;
-  serializeJsonPretty(doc, out);
-  server.send(200, "application/json", out);
+  server.send(200, "text/plain", "ok");
 }
 
 static void handleFwGet() {
   pageBegin("Firmware Update");
+  pageWrite(F("<h2 style='margin:0 0 14px;font-size:17px;font-weight:700'>Firmware Update</h2>"));
 
-  // Show the result of the last OTA attempt (if any).
+  // ── Post-install result banner ──────────────────────────────────────────
   if (gOtaPhase == FWOTA_SUCCESS) {
     pageWrite(F("<div class='card' style='border-left:4px solid green'>"
                 "<div class='title' style='color:green'>Update Successful</div>"
-                "<p>Firmware updated successfully. Current version: <b>"));
+                "<p>Firmware updated. Current version: <b>"));
     pageWrite(String(HA_SW_VERSION));
     pageWrite(F("</b></p></div>"));
     gOtaPhase = FWOTA_IDLE;
   } else if (gOtaPhase == FWOTA_FAILED) {
     pageWrite(F("<div class='card' style='border-left:4px solid red'>"
-                "<div class='title' style='color:red'>Update Failed</div>"
-                "<p>"));
+                "<div class='title' style='color:red'>Update Failed</div><p>"));
     pageWrite(gOtaError.length() ? gOtaError : String("Unknown error"));
     pageWrite(F("</p></div>"));
     gOtaPhase = FWOTA_IDLE;
   }
 
+  // ── Main card ───────────────────────────────────────────────────────────
   pageWrite(F("<div class='card'>"
-              "<div class='title'>Manual Firmware Update</div>"));
-  pageWrite(F("<p>Current release: <b>"));
+              // Two-column version row
+              "<div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px'>"
+                "<div>"
+                  "<div style='font-size:12px;color:var(--muted)'>Current version</div>"
+                  "<div style='font-size:26px;font-weight:700;line-height:1.3'>v"));
   pageWrite(String(HA_SW_VERSION));
-  if (gPendingUpdateTag.length() && gPendingUpdateUrl.length()) {
-    pageWrite(F("</b> &nbsp;<span style='color:#c80'>&#8593; v"));
-    pageWrite(gPendingUpdateTag);
-    pageWrite(F(" available</span>"));
-  } else {
-    pageWrite(F("</b>"));
-  }
-  pageWrite(F("</p>"
-              "<form method='POST' action='/fw' enctype='multipart/form-data' class='form-sec'>"
-              "<div class='field'>"
-                "<input type='file' name='fw' accept='.bin' required>"
-              "</div>"
-              "<div class='row' style='margin-top:10px'>"
-                "<button type='submit' class='btn'>Update</button>"
-              "</div>"
-              "</form>"
-              "<form method='POST' action='/fw/check' class='form-sec'>"
-              "<div class='row' style='margin-top:10px'>"
-                "<button type='submit' class='btn'>Check for Update</button>"
-              "</div>"
-              "</form>"
-              ));
-
-  // ── Inline check result ────────────────────────────────────────────────────
-  if (gCheckResult == 1) {
-    pageWrite(F("<p style='color:green;margin:8px 0'>&#10003; Firmware is up to date.</p>"));
-    gCheckResult = 0;
-  } else if (gCheckResult == 2) {
-    pageWrite(F("<p style='color:red;margin:8px 0'>&#10007; Check failed: "));
-    pageWrite(gCheckError);
-    pageWrite(F("</p>"));
-    gCheckResult = 0;
-  }
-
-  // ── Download / Install buttons when a newer version was found ─────────────
-  if (gPendingUpdateTag.length() && gPendingUpdateUrl.length()) {
-    pageWrite(F("<div class='row' style='margin-top:10px;gap:8px'>"));
-    pageWrite(F("<a class='btn' target='_blank' rel='noopener' href='"));
-    pageWrite(gPendingUpdateUrl);
-    pageWrite(F("'>&#8595; Download v"));
-    pageWrite(gPendingUpdateTag);
-    pageWrite(F("</a>"));
-#if !defined(ESP8266)
-    pageWrite(F("<button class='btn' onclick='doUpd()'>&#8679; Install Update</button>"));
-#endif
-    pageWrite(F("</div>"));
-#if !defined(ESP8266)
-    // ESP32 SSE progress + JS — only injected when an update is pending.
-    pageWrite(F("<div id='prg' style='display:none;margin-top:10px'>"
-                "<table style='border-collapse:collapse;width:100%;margin-top:8px'>"
-                "<tr><td id='p1' style='padding:4px 0'>[ ] Connecting to download server</td></tr>"
-                "<tr><td id='p2' style='padding:4px 0;color:#aaa'>[ ] Downloading firmware</td></tr>"
-                "<tr><td id='p3' style='padding:4px 0;color:#aaa'>[ ] Flashing &amp; verifying</td></tr>"
-                "</table>"
-                "<div id='pres' style='margin-top:10px'></div>"
+  pageWrite(F("</div>"
                 "</div>"
-                "<script>"
-                "var lastPhase='';"
-                "function doUpd(){"
-                  "document.querySelector('button[onclick]').disabled=true;"
-                  "document.getElementById('prg').style.display='block';"
-                  "document.getElementById('p1').textContent='>>> Connecting to download server...';"
-                  "fetch('/fw/update',{method:'POST'})"
-                  ".then(function(r){"
-                    "var rd=r.body.getReader(),dc=new TextDecoder(),buf='';"
-                    "function pump(){"
-                      "rd.read().then(function(x){"
-                        "if(x.done){"
-                          "if(lastPhase==='downloading'){"
-                            "document.getElementById('p2').textContent='[..] Downloading & flashing (please wait)...';"
-                            "document.getElementById('pres').innerHTML='<p>Device is writing firmware. Will reboot automatically.<br><b>This page will redirect in 90 seconds.</b></p>';"
-                            "setTimeout(function(){location.href='/fw';},90000);"
-                          "}"
-                          "return;"
-                        "}"
-                        "buf+=dc.decode(x.value,{stream:true});"
-                        "var parts=buf.split('\\n\\n');"
-                        "buf=parts.pop();"
-                        "parts.forEach(function(p){"
-                          "if(p.slice(0,6)==='data: '){"
-                            "try{onEvt(JSON.parse(p.slice(6)));}catch(e){}"
-                          "}"
-                        "});"
-                        "pump();"
-                      "});"
-                    "}"
-                    "pump();"
-                  "})"
-                  ".catch(function(e){"
-                    "document.getElementById('pres').innerHTML='<span style=color:red>Connection error: '+e+'</span>';"
-                  "});"
-                "}"
-                "function onEvt(d){"
-                  "var p=d.phase;lastPhase=p;"
-                  "if(p==='resolving'){"
-                    "document.getElementById('p1').textContent='>>> Connecting...';"
-                  "}else if(p==='downloading'){"
-                    "document.getElementById('p1').textContent='[OK] Connected';"
-                    "document.getElementById('p1').style.color='green';"
-                    "document.getElementById('p2').textContent='>>> Downloading firmware...';"
-                    "document.getElementById('p2').style.color='';"
-                  "}else if(p==='success'){"
-                    "document.getElementById('p2').textContent='[OK] Downloaded';"
-                    "document.getElementById('p2').style.color='green';"
-                    "document.getElementById('p3').textContent='[OK] Flash complete!';"
-                    "document.getElementById('p3').style.color='green';"
-                    "document.getElementById('pres').innerHTML='<b>Update successful!</b> Rebooting&hellip; Redirecting in 15s.';"
-                    "setTimeout(function(){location.href='/';},15000);"
-                  "}else if(p==='failed'){"
-                    "document.getElementById('pres').innerHTML='<span style=color:red><b>Failed:</b> '+d.error+'</span>';"
-                  "}"
-                "}"
-                "</script>"));
-#endif
-  }
-  pageWrite(F(
-              "<div class='row' style='margin-top:10px'>"
-                "<a class='btn' href='/netcheck' target='_blank' rel='noopener'>Run Internet Check</a>"
+                "<div id='latestCol' style='text-align:right;display:none'>"
+                  "<div style='font-size:12px;color:var(--muted)'>Latest release</div>"
+                  "<div id='latestVer' style='font-size:26px;font-weight:700;line-height:1.3'></div>"
+                  "<div id='latestBtns' style='margin-top:6px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap'></div>"
+                "</div>"
               "</div>"
-              "<p style='opacity:.7'>Do not power off during update. Device will reboot automatically.</p>"
+              // Status line
+              "<div id='verStatus' style='margin-top:10px;font-size:13px;color:var(--muted)'>Checking...</div>"
+              "<hr style='border:none;border-top:1px solid var(--border);margin:14px 0'>"
+              "<div class='title' style='font-size:14px;margin-bottom:8px'>Upload Firmware File</div>"
+              "<form id='fwForm'>"
+              "<div class='row' style='gap:8px;flex-wrap:wrap'>"
+                "<input type='file' id='fwFile' name='fw' accept='.bin' required>"
+                "<button type='submit' id='uploadBtn' class='btn'>Flash</button>"
+              "</div></form>"
+              "<div id='uploadProgress' style='display:none;margin-top:10px'>"
+                "<progress id='uploadBar' value='0' max='100' style='width:100%;height:16px'></progress>"
+                "<div style='display:flex;justify-content:space-between;font-size:12px;margin-top:3px'>"
+                  "<span id='uploadPct'>0%</span><span id='uploadStatus'></span>"
+                "</div>"
               "</div>"));
 
+#if !defined(ESP8266)
+  pageWrite(F("<div id='prg' style='display:none;margin-top:12px'>"
+              "<table style='border-collapse:collapse;width:100%;margin-top:8px'>"
+              "<tr><td id='p1' style='padding:4px 0'>[ ] Connecting to download server</td></tr>"
+              "<tr><td id='p2' style='padding:4px 0;color:#aaa'>[ ] Downloading firmware</td></tr>"
+              "<tr><td id='p3' style='padding:4px 0;color:#aaa'>[ ] Flashing &amp; verifying</td></tr>"
+              "</table>"
+              "<div id='pres' style='margin-top:10px'></div>"
+              "</div>"));
+#endif
+
+  pageWrite(F("<p style='opacity:.7;margin:12px 0 0'>Do not power off during update. Device will reboot automatically.</p>"
+              "</div>"));
+
+  // ── JavaScript ─────────────────────────────────────────────────────────
+  pageWrite(F("<script>var _cur='"));
+  pageWrite(String(HA_SW_VERSION));
+#if !defined(ESP8266)
+  pageWrite(F("';var _esp32=true;"));
+#else
+  pageWrite(F("';var _esp32=false;"));
+#endif
+
+  // Semver compare + platform bin picker + auto version check on load
+  pageWrite(F(
+    "function _cmp(a,b){"
+      "var pa=a.replace(/^v/,'').split('.').map(Number),"
+          "pb=b.replace(/^v/,'').split('.').map(Number);"
+      "for(var i=0;i<3;i++){var d=(pa[i]||0)-(pb[i]||0);if(d)return d;}return 0;"
+    "}"
+    "function _bin(assets){"
+      "var b=assets.filter(function(a){return a.name.toLowerCase().endsWith('.bin');});"
+      "if(!b.length)return null;"
+      "var p=b.filter(function(a){"
+        "var n=a.name.toLowerCase();"
+        "return _esp32?(n.indexOf('esp32')>=0&&n.indexOf('8266')<0):(n.indexOf('8266')>=0);"
+      "});"
+      "return p.length?p[0]:b[0];"
+    "}"
+    "(function(){"
+      "var st=document.getElementById('verStatus');"
+      "fetch('https://api.github.com/repos/hollako/Dynet-MQTT-Home-Assistant-Gateway/releases/latest',{cache:'no-store'})"
+      ".then(function(r){return r.json();})"
+      ".then(function(d){"
+        "var tag=(d.tag_name||'').replace(/^v/,'');"
+        "if(!tag){st.innerHTML='<span style=\"color:#aaa\">Version check failed</span>';return;}"
+        // Always populate the right column
+        "document.getElementById('latestVer').textContent='v'+tag;"
+        "var asset=_bin(d.assets||[]);"
+        "if(asset){"
+          "var isNewer=_cmp(tag,_cur.replace(/^v/,''))>0;"
+          "var html='<a class=\"btn\" href=\"'+asset.browser_download_url+'\" target=\"_blank\" rel=\"noopener\" style=\"font-size:13px\">Download latest .bin</a>';"
+          "if(_esp32&&isNewer)html+=' <button id=\"instBtn\" class=\"btn\" style=\"font-size:13px\" data-u=\"'+asset.browser_download_url+'\" data-t=\"'+tag+'\" onclick=\"_inst(this.dataset.u,this.dataset.t)\">&#8679; Install</button>';"
+          "document.getElementById('latestBtns').innerHTML=html;"
+        "}"
+        "document.getElementById('latestCol').style.display='';"
+        // Status line
+        "var isNewer=_cmp(tag,_cur.replace(/^v/,''))>0;"
+        "st.innerHTML=isNewer"
+          "?\"<span style='color:#f59e0b;font-weight:600;font-size:15px'>&#9650; New version available - click Download to get the firmware, Choose the file and click Flash</span>\""
+          ":'<span style=\"color:#19c37d\">&#10003; Firmware is up to date</span>';"
+      "})"
+      ".catch(function(){st.innerHTML='<span style=\"color:#aaa\">Version check failed</span>';});"
+    "})();"
+    // XHR upload with progress bar
+    "document.getElementById('fwForm').addEventListener('submit',function(e){"
+      "e.preventDefault();"
+      "var f=document.getElementById('fwFile').files[0];if(!f)return;"
+      "var xhr=new XMLHttpRequest();"
+      "document.getElementById('uploadProgress').style.display='block';"
+      "document.getElementById('uploadBtn').disabled=true;"
+      "xhr.upload.onprogress=function(e){"
+        "if(e.lengthComputable){var p=Math.round(e.loaded/e.total*100);"
+          "document.getElementById('uploadBar').value=p;"
+          "document.getElementById('uploadPct').textContent=p+'%';}"
+      "};"
+      "xhr.onload=function(){"
+        "if(xhr.status===200){"
+          "document.getElementById('uploadBar').value=100;"
+          "document.getElementById('uploadPct').textContent='100%';"
+          "document.getElementById('uploadStatus').innerHTML='<span style=\"color:green\">Flash complete! Rebooting...</span>';"
+          "setTimeout(function(){location.href='/fw';},15000);"
+        "}else{"
+          "document.getElementById('uploadStatus').innerHTML='<span style=\"color:red\">Error '+xhr.status+'</span>';"
+          "document.getElementById('uploadBtn').disabled=false;}"
+      "};"
+      "xhr.onerror=function(){"
+        "document.getElementById('uploadStatus').innerHTML='<span style=\"color:red\">Upload failed</span>';"
+        "document.getElementById('uploadBtn').disabled=false;};"
+      "var fd=new FormData();fd.append('fw',f);"
+      "xhr.open('POST','/fw');xhr.send(fd);"
+    "});"
+  ));
+
+#if !defined(ESP8266)
+  // ESP32: remote install via set-pending + SSE progress
+  pageWrite(F(
+    "function _inst(url,tag){"
+      "var btn=document.getElementById('instBtn');if(btn)btn.disabled=true;"
+      "document.getElementById('prg').style.display='block';"
+      "document.getElementById('p1').textContent='>>> Connecting...';"
+      "fetch('/fw/set-pending',{method:'POST',"
+        "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+        "body:'url='+encodeURIComponent(url)+'&tag='+encodeURIComponent(tag)})"
+      ".then(function(){doUpd();})"
+      ".catch(function(){document.getElementById('pres').innerHTML='<span style=\"color:red\">Error</span>';});"
+    "}"
+    "var lastPhase='';"
+    "function doUpd(){"
+      "fetch('/fw/update',{method:'POST'})"
+      ".then(function(r){"
+        "var rd=r.body.getReader(),dc=new TextDecoder(),buf='';"
+        "function pump(){"
+          "rd.read().then(function(x){"
+            "if(x.done){"
+              "if(lastPhase==='downloading'){"
+                "document.getElementById('p2').textContent='[..] Flashing (please wait)...';"
+                "document.getElementById('pres').innerHTML='<p>Writing firmware. Will reboot.<br><b>Redirecting in 90s.</b></p>';"
+                "setTimeout(function(){location.href='/fw';},90000);"
+              "}"
+              "return;"
+            "}"
+            "buf+=dc.decode(x.value,{stream:true});"
+            "var parts=buf.split('\\n\\n');buf=parts.pop();"
+            "parts.forEach(function(p){"
+              "if(p.slice(0,6)==='data: '){try{onEvt(JSON.parse(p.slice(6)));}catch(e){}}"
+            "});"
+            "pump();"
+          "});"
+        "}"
+        "pump();"
+      "})"
+      ".catch(function(e){"
+        "document.getElementById('pres').innerHTML='<span style=\"color:red\">Connection error: '+e+'</span>';"
+      "});"
+    "}"
+    "function onEvt(d){"
+      "var p=d.phase;lastPhase=p;"
+      "if(p==='resolving'){"
+        "document.getElementById('p1').textContent='>>> Connecting...';"
+      "}else if(p==='downloading'){"
+        "document.getElementById('p1').textContent='[OK] Connected';"
+        "document.getElementById('p1').style.color='green';"
+        "document.getElementById('p2').textContent='>>> Downloading firmware...';"
+        "document.getElementById('p2').style.color='';"
+      "}else if(p==='success'){"
+        "document.getElementById('p2').textContent='[OK] Downloaded';"
+        "document.getElementById('p2').style.color='green';"
+        "document.getElementById('p3').textContent='[OK] Flash complete!';"
+        "document.getElementById('p3').style.color='green';"
+        "document.getElementById('pres').innerHTML='<b>Update successful!</b> Rebooting&hellip; Redirecting in 15s.';"
+        "setTimeout(function(){location.href='/';},15000);"
+      "}else if(p==='failed'){"
+        "document.getElementById('pres').innerHTML='<span style=\"color:red\"><b>Failed:</b> '+d.error+'</span>';"
+      "}"
+    "}"
+  ));
+#endif
+
+  pageWrite(F("</script>"));
   pageEnd();
 }
 
@@ -1912,7 +1818,7 @@ static void handleFwUpload() {
       } else {
         sendRebootingPage("Update Successful",
                           (String("Flashed ") + total + " bytes. Rebooting...").c_str(),
-                          10, 1200);
+                          15, 1200);
         scheduleReboot(1200);
       }
     } break;
@@ -1932,14 +1838,16 @@ static void handleFwUpload() {
 
 void handleConfigPost() {
   if (server.hasArg("device_id")) { deviceId = server.arg("device_id"); eepromSaveDeviceId(deviceId); }
-  if (server.hasArg("wifi_ssid")) setStr(cfg.wifi_ssid, sizeof(cfg.wifi_ssid), server.arg("wifi_ssid"));
-  if (server.hasArg("wifi_pass")) setStr(cfg.wifi_pass, sizeof(cfg.wifi_pass), server.arg("wifi_pass"));
-  if (server.hasArg("mqtt_server")) setStr(cfg.mqtt_server, sizeof(cfg.mqtt_server), server.arg("mqtt_server"));
-  if (server.hasArg("mqtt_port"))   cfg.mqtt_port = server.arg("mqtt_port").toInt();
-  if (server.hasArg("mqtt_user"))   setStr(cfg.mqtt_user, sizeof(cfg.mqtt_user), server.arg("mqtt_user"));
-  if (server.hasArg("mqtt_pass"))   setStr(cfg.mqtt_pass, sizeof(cfg.mqtt_pass), server.arg("mqtt_pass"));
-  if (server.hasArg("ap_ssid"))     apSsid = server.arg("ap_ssid");
-  if (server.hasArg("ap_pass"))     apPass = server.arg("ap_pass");
+  if (server.hasArg("wifi_ssid")  && server.arg("wifi_ssid").length())  setStr(cfg.wifi_ssid,  sizeof(cfg.wifi_ssid),  server.arg("wifi_ssid"));
+  if (server.hasArg("wifi_pass"))                                        setStr(cfg.wifi_pass,  sizeof(cfg.wifi_pass),  server.arg("wifi_pass"));   // optional — allow clearing
+  if (server.hasArg("wifi_ssid2"))                                       setStr(cfg.wifi_ssid2, sizeof(cfg.wifi_ssid2), server.arg("wifi_ssid2")); // optional fallback
+  if (server.hasArg("wifi_pass2"))                                       setStr(cfg.wifi_pass2, sizeof(cfg.wifi_pass2), server.arg("wifi_pass2")); // optional fallback
+  if (server.hasArg("mqtt_server") && server.arg("mqtt_server").length()) setStr(cfg.mqtt_server, sizeof(cfg.mqtt_server), server.arg("mqtt_server"));
+  if (server.hasArg("mqtt_port")   && server.arg("mqtt_port").length())  cfg.mqtt_port = server.arg("mqtt_port").toInt();
+  if (server.hasArg("mqtt_user"))   setStr(cfg.mqtt_user, sizeof(cfg.mqtt_user), server.arg("mqtt_user")); // optional — allow clearing
+  if (server.hasArg("mqtt_pass"))   setStr(cfg.mqtt_pass, sizeof(cfg.mqtt_pass), server.arg("mqtt_pass")); // optional — allow clearing
+  if (server.hasArg("ap_ssid")     && server.arg("ap_ssid").length())    apSsid = server.arg("ap_ssid");
+  if (server.hasArg("ap_pass"))     apPass = server.arg("ap_pass");                                        // optional — allow clearing
   cfg.ha_discovery  = server.hasArg("ha_discovery");
   cfg.log_web       = server.hasArg("log_web");
   if (!cfg.log_web) logs_clear();  // immediately free heap when disabled
@@ -1968,7 +1876,7 @@ if (server.hasArg("dynet_max_areas")) {
 
   sendRebootingPage("Saved",
                     "If the page doesn’t return, reconnect via the new IP or AP 192.168.4.1.",
-                    10, 5000);
+                    15, 5000);
   if (server.client()) server.client().flush();
   delay(150);
   scheduleReboot(2200);
@@ -2031,7 +1939,7 @@ void handleRestoreBackupPost() {
   mqttEnsureConnected();
   rediscoveryScheduled = true; rediscoveryPtr = 0; nextRediscoveryAt = millis() + 300;
 
-  sendRebootingPage("Restore complete","Settings applied. The device will come back online shortly.",10,5000);
+  sendRebootingPage("Restore complete","Settings applied. The device will come back online shortly.",15,5000);
   if (server.client()) { server.client().flush(); }
   delay(150);
   scheduleReboot(2200);
@@ -2082,9 +1990,9 @@ void webOtaLoop() {
   void registerFwRoutes() {
     // GET: show form
     server.on("/fw", HTTP_GET, handleFwGet);
+    server.on("/fw/set-pending", HTTP_POST, handleFwSetPending);
     server.on("/fw/check", HTTP_POST, handleFwCheckUpdate);
     server.on("/fw/update", HTTP_POST, handleFwDoUpdate);
-    server.on("/netcheck", HTTP_GET, handleNetCheck);
 
     // POST: upload (note the "upload handler" as 2nd lambda/func)
     server.on("/fw", HTTP_POST,
@@ -2132,8 +2040,12 @@ void handleApPortalGet() {
   // Wi-Fi form
   s += "<div class='card'><h3>Wi‑Fi</h3>"
        "<form method='POST' action='/ap_portal_config'>"
-       "<label>SSID</label><input name='wifi_ssid' type='text' value=''>"
-       "<label>Password</label><input name='wifi_pass' type='password' value=''>"
+       "<label>SSID</label><input name='wifi_ssid' type='text' required value=''>"
+       "<label>Password</label>"
+       "<div style='display:flex;gap:6px;align-items:center'>"
+         "<input id='wpPass' name='wifi_pass' type='password' value='' style='flex:1'>"
+         "<button type='button' onclick=\"var i=document.getElementById('wpPass');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'Show':'Hide';\" style='padding:8px 12px;border:1px solid #ccc;border-radius:8px;cursor:pointer;background:#fafafa;white-space:nowrap'>Show</button>"
+       "</div>"
        "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap'>"
        "<button class='btn' type='submit'>Save & Connect</button>"
        "<button class='btn' type='button' onclick='scanW()'>Scan</button>"
@@ -2181,8 +2093,8 @@ void handleApPortalGet() {
 }
 
 void handleApPortalConfigPost() {
-  if (server.hasArg("wifi_ssid")) setStr(cfg.wifi_ssid, sizeof(cfg.wifi_ssid), server.arg("wifi_ssid"));
-  if (server.hasArg("wifi_pass")) setStr(cfg.wifi_pass, sizeof(cfg.wifi_pass), server.arg("wifi_pass"));
+  if (server.hasArg("wifi_ssid") && server.arg("wifi_ssid").length()) setStr(cfg.wifi_ssid, sizeof(cfg.wifi_ssid), server.arg("wifi_ssid"));
+  if (server.hasArg("wifi_pass")) setStr(cfg.wifi_pass, sizeof(cfg.wifi_pass), server.arg("wifi_pass")); // optional — allow empty (open network)
   saveConfig();
 
   WiFi.mode(WIFI_AP_STA);
@@ -2208,7 +2120,7 @@ void handleApPortalConfigPost() {
   sendRebootingPage(
     "Saved",
     detail,
-    10,    // countdown seconds
+    15,    // countdown seconds
     5000   // wait before first /status probe
   );
   if (server.client()) { server.client().flush(); }
@@ -2230,8 +2142,8 @@ static void handleImportGet() {
         "<span id='xstat' class='muted'></span>"
       "</div>"
       "<div id='preview' style='margin-top:14px'></div>"
-      "<div id='importWrap' style='display:none;margin-top:12px'>"
-        "<button class='btn' onclick='doImport()'>&#x2B07; Import All Areas</button>"
+      "<div id='importWrap' style='display:none;margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap'>"
+        "<button class='btn' id='importBtn' onclick='doImport()'>&#x2B07; Import</button>"
       "</div>"
       "<div id='progress' style='margin-top:10px'></div>"
     "</div>"
@@ -2239,7 +2151,18 @@ static void handleImportGet() {
   pageWrite(F("<script>"
   "var parsedAreas=[];"
 
-  // XML parser
+  // ── Selection helpers ────────────────────────────────────────────────────
+  "function toggleAll(cb){"
+    "document.querySelectorAll('.asel').forEach(function(c){c.checked=cb.checked;});"
+    "updateBtn();"
+  "}"
+  "function updateBtn(){"
+    "var n=document.querySelectorAll('.asel:checked').length;"
+    "var b=document.getElementById('importBtn');"
+    "if(b) b.textContent='⬇ Import '+n+' Area'+(n!==1?'s':'');"
+  "}"
+
+  // ── XML parser ───────────────────────────────────────────────────────────
   "function parseXml(inp){"
     "var f=inp.files[0]; if(!f) return;"
     "document.getElementById('xstat').textContent='Parsing…';"
@@ -2264,7 +2187,7 @@ static void handleImportGet() {
           "if(pc<1) pc=4;"
           "if(type===0&&pc>16) pc=16;"
 
-          // channels — direct children only to avoid cross-area contamination
+          // channels — direct children only
           "var channels=[];"
           "var kids=a.childNodes;"
           "for(var j=0;j<kids.length;j++){"
@@ -2308,17 +2231,20 @@ static void handleImportGet() {
         "}"
         "parsedAreas.sort(function(a,b){return a.area-b.area;});"
 
-        // Summary
+        // Summary line
         "var nL=parsedAreas.filter(function(a){return a.type===0;}).length;"
         "var nC=parsedAreas.filter(function(a){return a.type===1;}).length;"
         "var nH=parsedAreas.filter(function(a){return a.type===2;}).length;"
         "var nCh=parsedAreas.reduce(function(s,a){return s+a.channels.length;},0);"
         "document.getElementById('xstat').textContent=parsedAreas.length+' areas found';"
 
-        // Preview table
-        "var h='<p><b>'+parsedAreas.length+' areas</b>: '+nL+' Lighting, '+nC+' Curtain, '+nH+' HVAC &mdash; '+nCh+' channels total.</p>';"
+        // Preview table with per-row checkboxes
+        "var h='<p><b>'+parsedAreas.length+' areas</b>: '+nL+' Lighting, '+nC+' Curtain, '+nH+' HVAC — '+nCh+' channels total.</p>';"
         "h+=\"<div style='max-height:320px;overflow-y:auto'><table style='width:100%;border-collapse:collapse;font-size:13px'>\";"
         "h+='<thead><tr>"
+          "<th style=\\'padding:4px 6px;border-bottom:1px solid var(--border)\\'>"
+            "<input type=\\'checkbox\\' id=\\'chkAll\\' checked title=\\'Select all / none\\' onchange=\\'toggleAll(this)\\'>"
+          "</th>"
           "<th style=\\'text-align:left;border-bottom:1px solid var(--border);padding:4px\\'>Area</th>"
           "<th style=\\'text-align:left;border-bottom:1px solid var(--border);padding:4px\\'>Name</th>"
           "<th style=\\'text-align:left;border-bottom:1px solid var(--border);padding:4px\\'>Type</th>"
@@ -2328,7 +2254,9 @@ static void handleImportGet() {
         "var tnames=['Lights','Curtain','HVAC'];"
         "for(var i=0;i<parsedAreas.length;i++){"
           "var a=parsedAreas[i];"
-          "h+='<tr><td style=\\'padding:3px 4px\\'>'+a.area+'</td>';"
+          "h+='<tr>';"
+          "h+='<td style=\\'padding:3px 6px\\'><input type=\\'checkbox\\' class=\\'asel\\' value=\\''+i+'\\'  checked onchange=\\'updateBtn()\\'></td>';"
+          "h+='<td style=\\'padding:3px 4px\\'>'+a.area+'</td>';"
           "h+='<td style=\\'padding:3px 4px\\'>'+a.name+'</td>';"
           "h+='<td style=\\'padding:3px 4px\\'>'+(tnames[a.type]||'?')+'</td>';"
           "h+='<td style=\\'padding:3px 4px;text-align:right\\'>'+a.channels.length+'</td>';"
@@ -2336,7 +2264,10 @@ static void handleImportGet() {
         "}"
         "h+='</tbody></table></div>';"
         "document.getElementById('preview').innerHTML=h;"
-        "if(parsedAreas.length) document.getElementById('importWrap').style.display='block';"
+        "if(parsedAreas.length){"
+          "document.getElementById('importWrap').style.display='flex';"
+          "updateBtn();"
+        "}"
       "}catch(ex){"
         "document.getElementById('xstat').textContent='Error: '+ex;"
       "}"
@@ -2344,22 +2275,27 @@ static void handleImportGet() {
     "rd.readAsText(f);"
   "}"
 
-  // Import driver
+  // ── Import driver ────────────────────────────────────────────────────────
   "function doImport(){"
-    "if(!parsedAreas.length) return;"
+    // Build list from checked rows only
+    "var sel=parsedAreas.filter(function(_,i){"
+      "var cb=document.querySelector('.asel[value=\"'+i+'\"]');"
+      "return cb&&cb.checked;"
+    "});"
+    "if(!sel.length){alert('No areas selected.');return;}"
     "document.getElementById('importWrap').style.display='none';"
     "var prog=document.getElementById('progress');"
-    "prog.innerHTML=\"<p>Starting import&hellip;</p>\";"
+    "prog.innerHTML='<p>Starting import…</p>';"
     "fetch('/api/import_start',{method:'POST'})"
     ".then(function(){"
       "var idx=0,ok=0,fail=0;"
       "function next(){"
-        "if(idx>=parsedAreas.length){"
-          "prog.innerHTML='<p>Finishing&hellip;</p>';"
+        "if(idx>=sel.length){"
+          "prog.innerHTML='<p>Finishing…</p>';"
           "fetch('/api/import_done',{method:'POST'})"
           ".then(function(r){return r.json();})"
           ".then(function(){"
-            "prog.innerHTML='<p><b style=\"color:green\">&#10003; Import complete!</b> '+"
+            "prog.innerHTML='<p><b style=\"color:green\">✓ Import complete!</b> '+"
               "ok+' areas imported, '+fail+' failed. '+"
               "'<a class=\"btn\" href=\"/\" style=\"padding:4px 14px\">Go to Home</a></p>';"
           "})"
@@ -2368,8 +2304,8 @@ static void handleImportGet() {
           "});"
           "return;"
         "}"
-        "var a=parsedAreas[idx];"
-        "prog.innerHTML='<p>Importing <b>'+a.name+'</b> (Area '+a.area+') &mdash; '+(idx+1)+' / '+parsedAreas.length+'</p>';"
+        "var a=sel[idx];"
+        "prog.innerHTML='<p>Importing <b>'+a.name+'</b> (Area '+a.area+') — '+(idx+1)+' / '+sel.length+'</p>';"
         "fetch('/api/import_area',{"
           "method:'POST',"
           "headers:{'Content-Type':'application/json'},"
@@ -2383,7 +2319,7 @@ static void handleImportGet() {
     "})"
     ".catch(function(e){"
       "prog.innerHTML='<p style=\"color:red\">Failed to start import: '+e+'</p>';"
-      "document.getElementById('importWrap').style.display='block';"
+      "document.getElementById('importWrap').style.display='flex';"
     "});"
   "}"
   "</script>"
@@ -2407,7 +2343,7 @@ void registerWebRoutes() {
 
   server.on("/config",  HTTP_GET, handleConfigGet);
   server.on("/config",  HTTP_POST, handleConfigPost);
-  server.on("/reboot", HTTP_GET, [](){ sendRebootingPage("Reboot requested","",10,2000); scheduleReboot(800); });
+  server.on("/reboot", HTTP_GET, [](){ sendRebootingPage("Reboot requested","",15,2000); scheduleReboot(800); });
 
   // Serve company logo from LittleFS (place PNG at data/logo.png and upload filesystem)
   server.on("/logo.png", HTTP_GET, [](){

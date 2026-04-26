@@ -26,6 +26,17 @@ It listens to DyNet traffic on RS485, maps lighting channels to MQTT topics, and
 - **Framework**: Arduino
 - **Dependencies**: PubSubClient, ArduinoJson, ESP Async WebServer, Async TCP library for the selected board
 
+## LED Status Indicator
+
+If a GPIO pin is assigned to an LED in the Configuration page, the LED reflects the current network and MQTT state:
+
+| LED Pattern | Meaning |
+|---|---|
+| Solid ON | Wi-Fi + MQTT connected (or Wi-Fi connected with no MQTT server configured) |
+| Double pulse — ●● pause ●● pause | Wi-Fi connected, waiting for MQTT broker |
+| Fast blink — 100 ms on / 100 ms off | Wi-Fi connecting, retries in progress |
+| Slow blink — 500 ms on / 1500 ms off | AP mode active — no Wi-Fi connection or all retries exhausted |
+
 ## Notes
 
 - MQTT broker address/port currently use firmware defaults (to be made configurable via Web UI).

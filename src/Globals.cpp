@@ -3,7 +3,7 @@
 // -------------------- HA metadata --------------------
 const char* HA_MANUFACTURER = "SmartWay";
 const char* HA_MODEL        = "ESPDynetGateway";
-const char* HA_SW_VERSION   = "2.0";
+const char* HA_SW_VERSION   = "1.9";
 
 // -------------------- EEPROM device_id magic ----------------
 const uint32_t DEV_ID_MAGIC = 0x44594E54; // 'DYNT'
@@ -201,6 +201,63 @@ String readWholeFile(const char* path) {
 bool isApPortalMode() {
   // AP active and no STA IP
   return apActive && (WiFi.status() != WL_CONNECTED);
+}
+
+// -------------------- LED status blinker --------------------
+// Non-blocking state machine driven from loop().
+//
+//  Mode 0 — SOLID         : WiFi + MQTT up (or WiFi up, no MQTT server set)
+//  Mode 1 — DOUBLE PULSE  : WiFi up, waiting for MQTT   ●●_●●_
+//  Mode 2 — FAST BLINK    : WiFi not connected, STA retrying  100ms on/off
+//  Mode 3 — SLOW BLINK    : AP portal mode, no WiFi     500ms on / 1500ms off
+void ledStatusLoop() {
+  if (ledPin < 0) return;
+
+  static unsigned long ledAt    = 0;
+  static uint8_t       ledStep  = 0;
+  static uint8_t       lastMode = 0xFF;
+
+  const bool wifiOk = (WiFi.status() == WL_CONNECTED);
+  const bool mqttOk = mqtt.connected();
+  const bool noMqtt = (cfg.mqtt_server[0] == '\0');
+
+  uint8_t mode;
+  if      (wifiOk && (mqttOk || noMqtt)) mode = 0;  // solid
+  else if (wifiOk)                        mode = 1;  // double pulse — waiting MQTT
+  else if (isApPortalMode())              mode = 3;  // slow blink  — AP portal
+  else                                    mode = 2;  // fast blink  — STA retrying
+
+  if (mode != lastMode) { lastMode = mode; ledStep = 0; ledAt = 0; }
+
+  const unsigned long now = millis();
+  if (now < ledAt) return;
+
+  switch (mode) {
+    case 0:  // solid ON — re-assert every second in case of glitch
+      setLed(true);
+      ledAt = now + 1000;
+      break;
+
+    case 1:  // double pulse: ●100 ○100 ●100 ○700 (1000 ms cycle)
+      switch (ledStep) {
+        case 0: setLed(true);  ledAt = now + 100; break;
+        case 1: setLed(false); ledAt = now + 100; break;
+        case 2: setLed(true);  ledAt = now + 100; break;
+        case 3: setLed(false); ledAt = now + 700; break;
+      }
+      ledStep = (ledStep + 1) & 3;
+      break;
+
+    case 2:  // fast blink — 100 ms on / 100 ms off
+      if (ledStep == 0) { setLed(true);  ledAt = now + 100; ledStep = 1; }
+      else              { setLed(false); ledAt = now + 100; ledStep = 0; }
+      break;
+
+    case 3:  // slow blink — 500 ms on / 1500 ms off
+      if (ledStep == 0) { setLed(true);  ledAt = now + 500;  ledStep = 1; }
+      else              { setLed(false); ledAt = now + 1500; ledStep = 0; }
+      break;
+  }
 }
 
 // mqttSafeId here (used by MqttManager)

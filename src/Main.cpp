@@ -111,5 +111,8 @@ void loop() {
   // Handle scheduled reboot (used by Save & Reboot, restore, etc.)
   serviceScheduledReboot();
 
+  // LED status indicator
+  ledStatusLoop();
+
   yield();
 }

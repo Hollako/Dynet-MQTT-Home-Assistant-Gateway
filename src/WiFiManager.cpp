@@ -84,8 +84,15 @@ const char* reasonToStr(uint8_t r) {
 void beginSTAIfCreds() {
   if (strlen(cfg.wifi_ssid) == 0) return;
 
-  Serial.printf("[WIFI] begin STA ssid='%s'\n", cfg.wifi_ssid);
-  staTriedSsid = String(cfg.wifi_ssid);
+  // After 3 failed attempts on the primary SSID, try the fallback (if configured),
+  // then alternate back every 3 retries: 0-2 → primary, 3-5 → fallback, 6-8 → primary …
+  const bool hasFallback = strlen(cfg.wifi_ssid2) > 0;
+  const bool useFallback = hasFallback && (staRetries % 6) >= 3;
+  const char* ssid = useFallback ? cfg.wifi_ssid2 : cfg.wifi_ssid;
+  const char* pass = useFallback ? cfg.wifi_pass2  : cfg.wifi_pass;
+
+  Serial.printf("[WIFI] begin STA ssid='%s'%s\n", ssid, useFallback ? " [fallback]" : "");
+  staTriedSsid = String(ssid);
 
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
@@ -98,7 +105,7 @@ void beginSTAIfCreds() {
   WiFi.disconnect(true);
   delay(50);
   WiFi.hostname(deviceId.c_str());   // must be set AFTER disconnect; disconnect resets it on ESP8266
-  WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
+  WiFi.begin(ssid, pass);
 
   staBusy = true;
   bumpStaRetries();

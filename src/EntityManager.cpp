@@ -23,7 +23,7 @@ static float fp_toC(uint8_t hi, uint8_t lo) {
   return sign * (integ + frac);
 }
 
-void EntityManager::begin() {
+void EntityManager::begin(int arCapOverride, int chCapOverride) {
   // Free channel array (no heap pointers inside ChannelState)
   if (_channels) { delete[] _channels; _channels = nullptr; }
   // Free area array — must null per-area heap pointers first to avoid double-free
@@ -38,12 +38,18 @@ void EntityManager::begin() {
 
   // dynet_max_channels = channels probed per area during sweep
   // dynet_max_areas    = area storage cap + sweep upper limit
-  int chPerArea = cfg.dynet_max_channels
-                  ? constrain((int)cfg.dynet_max_channels, 1, (int)DYNET_MAX_CHANNELS)
-                  : DYNET_MAX_CHANNELS;
-  int arCap     = cfg.dynet_max_areas
-                  ? constrain((int)cfg.dynet_max_areas, 1, (int)DYNET_MAX_AREAS)
-                  : DYNET_MAX_AREAS;
+  // Overrides take priority (used by loadEntities to avoid dropping saved entities
+  // when the user has lowered the config cap below what is stored on disk).
+  int chPerArea = (chCapOverride > 0)
+                  ? constrain(chCapOverride, 1, (int)DYNET_MAX_CHANNELS)
+                  : (cfg.dynet_max_channels
+                     ? constrain((int)cfg.dynet_max_channels, 1, (int)DYNET_MAX_CHANNELS)
+                     : DYNET_MAX_CHANNELS);
+  int arCap     = (arCapOverride > 0)
+                  ? constrain(arCapOverride, 1, (int)DYNET_MAX_AREAS)
+                  : (cfg.dynet_max_areas
+                     ? constrain((int)cfg.dynet_max_areas, 1, (int)DYNET_MAX_AREAS)
+                     : DYNET_MAX_AREAS);
   // Total channel pool = areas × channels-per-area.
   // Capped at 200 on ESP8266 (limited heap), 2000 on ESP32.
 #if defined(ESP8266)

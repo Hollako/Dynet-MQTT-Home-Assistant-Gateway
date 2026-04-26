@@ -82,6 +82,7 @@ int  sanitizeLedGpio(int pin);
 int  sanitizeGpio(int v);
 void setLed(bool on);
 void applyLedPin();
+void ledStatusLoop();          // non-blocking LED status blinker — call every loop()
 
 extern int  buttonPin;         // -1 = disabled
 extern bool buttonActiveLow;
@@ -102,6 +103,8 @@ struct AppConfig {
   uint8_t net_mode;            // 0=WiFi, 1=Ethernet
   char wifi_ssid[64];
   char wifi_pass[64];
+  char wifi_ssid2[64];   // fallback SSID (optional)
+  char wifi_pass2[64];   // fallback password
   // MQTT
   char mqtt_server[64];
   int  mqtt_port;

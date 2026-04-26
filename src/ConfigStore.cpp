@@ -28,8 +28,10 @@ bool loadConfig() {
 
   if (doc.containsKey("ap_ssid"))      apSsid = String((const char*)doc["ap_ssid"]);
   if (doc.containsKey("ap_pass"))      apPass = String((const char*)doc["ap_pass"]);
-  if (doc.containsKey("wifi_ssid"))    setStr(cfg.wifi_ssid, sizeof(cfg.wifi_ssid), String((const char*)doc["wifi_ssid"]));
-  if (doc.containsKey("wifi_pass"))    setStr(cfg.wifi_pass, sizeof(cfg.wifi_pass), String((const char*)doc["wifi_pass"]));
+  if (doc.containsKey("wifi_ssid"))    setStr(cfg.wifi_ssid,  sizeof(cfg.wifi_ssid),  String((const char*)doc["wifi_ssid"]));
+  if (doc.containsKey("wifi_pass"))    setStr(cfg.wifi_pass,  sizeof(cfg.wifi_pass),  String((const char*)doc["wifi_pass"]));
+  if (doc.containsKey("wifi_ssid2"))   setStr(cfg.wifi_ssid2, sizeof(cfg.wifi_ssid2), String((const char*)doc["wifi_ssid2"]));
+  if (doc.containsKey("wifi_pass2"))   setStr(cfg.wifi_pass2, sizeof(cfg.wifi_pass2), String((const char*)doc["wifi_pass2"]));
   if (doc.containsKey("mqtt_server"))  setStr(cfg.mqtt_server, sizeof(cfg.mqtt_server), String((const char*)doc["mqtt_server"]));
   if (doc.containsKey("mqtt_port"))    cfg.mqtt_port = (int)doc["mqtt_port"];
   if (doc.containsKey("mqtt_user"))    setStr(cfg.mqtt_user, sizeof(cfg.mqtt_user), String((const char*)doc["mqtt_user"]));
@@ -61,6 +63,8 @@ bool saveConfig() {
   doc["ap_pass"]      = apPass;
   doc["wifi_ssid"]    = cfg.wifi_ssid;
   doc["wifi_pass"]    = cfg.wifi_pass;
+  doc["wifi_ssid2"]   = cfg.wifi_ssid2;
+  doc["wifi_pass2"]   = cfg.wifi_pass2;
   doc["mqtt_server"]  = cfg.mqtt_server;
   doc["mqtt_port"]    = cfg.mqtt_port;
   doc["mqtt_user"]    = cfg.mqtt_user;
@@ -91,13 +95,13 @@ bool loadEntities() {
   File f = LittleFS.open(ENTITIES_FILE, "r"); if (!f) return false;
 
   // ESP32 can have 255 areas — needs a large pool.
-  // ESP8266 (D1 Mini @ 160 MHz): DYNET_MAX_AREAS raised to 128; pool raised to 24 KB.
-  // ArduinoJson internal tree overhead is ~3× the serialised JSON size.
-  // 24 KB covers ~87 areas + ~300 channels with headroom; heap spike is temporary.
+  // ESP8266: max 32 areas + 200 channels; ArduinoJson pool for that is ~8-10 KB.
+  // 10 KB was proven to work; going higher causes malloc failure on the
+  // fragmented post-WiFi/MQTT heap and silently breaks persistence.
 #if defined(ESP32)
   DynamicJsonDocument doc(65536);
 #else
-  DynamicJsonDocument doc(24576);
+  DynamicJsonDocument doc(10240);
 #endif
   DeserializationError err = deserializeJson(doc, f, DeserializationOption::NestingLimit(8));
   f.close();
@@ -106,7 +110,10 @@ bool loadEntities() {
     return false;
   }
 
-  em.begin();
+  // Always begin with compile-time maximum caps so that no saved entities are
+  // silently dropped because the user lowered cfg.dynet_max_areas/channels.
+  // The user cap only controls sweep/discovery, not what we can hold in RAM.
+  em.begin(DYNET_MAX_AREAS, DYNET_MAX_CHANNELS);
   em.setLoading(true);   // suppress publish/save inside touchArea/touchChannel
 
   // channels
@@ -278,14 +285,23 @@ bool loadEntities() {
 
 bool saveEntities() {
   using namespace DynetEntities;
-  File f = LittleFS.open(ENTITIES_FILE, "w"); if (!f) return false;
 
-  // Same sizing rationale as loadEntities()
+  // ── Build JSON doc BEFORE opening the file ─────────────────────────────
+  // CRITICAL: LittleFS.open("w") truncates the file immediately. If we open
+  // first and then fail (OOM, overflow), the existing entities.json is wiped
+  // and all config is lost on next reboot. Build + validate first, write last.
+  // ESP8266: 10 KB matches the load doc and fits in the fragmented post-WiFi heap.
 #if defined(ESP32)
   DynamicJsonDocument doc(65536);
 #else
-  DynamicJsonDocument doc(24576);
+  DynamicJsonDocument doc(10240);
 #endif
+
+  // Guard: if malloc failed (heap fragmentation), capacity == 0
+  if (doc.capacity() == 0) {
+    LOGF("[persist] saveEntities: OOM — doc malloc failed, keeping old file\n");
+    return false;
+  }
 
   // channels
   JsonArray chs = doc.createNestedArray("channels");
@@ -363,12 +379,18 @@ bool saveEntities() {
     }
   }
 
-  // Serialize directly to the file — avoids a full String copy on heap.
+  // Guard: doc overflowed — old file is still intact, do not overwrite it
+  if (doc.overflowed()) {
+    LOGF("[persist] saveEntities: JSON doc overflowed — keeping old file safe\n");
+    return false;
+  }
+
+  // ── Only now open (and truncate) the file ──────────────────────────────
+  File f = LittleFS.open(ENTITIES_FILE, "w");
+  if (!f) { LOGF("[persist] saveEntities: cannot open file for write\n"); return false; }
   size_t n = serializeJson(doc, f);
   f.flush(); f.close();
-  if (doc.overflowed()) {
-    LOGF("[persist] saveEntities: JSON doc overflowed! Increase doc capacity.\n");
-  }
+
   LOGF("[persist] saveEntities: wrote %u bytes, ch=%d areas=%d\n",
        (unsigned)n, em.channelsCount(), em.areasCount());
   return (n > 0);

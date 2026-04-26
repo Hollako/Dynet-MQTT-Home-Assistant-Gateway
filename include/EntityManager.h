@@ -112,7 +112,10 @@ struct AreaState {
 
 class EntityManager {
 public:
-  void begin();
+  // arCapOverride / chCapOverride: if > 0, use these instead of cfg values.
+  // Pass DYNET_MAX_AREAS / DYNET_MAX_CHANNELS when loading from storage so
+  // entities are never dropped just because the user lowered the config cap.
+  void begin(int arCapOverride = 0, int chCapOverride = 0);
 
   // Ensure entries exist; returns index or -1 if full
   int  touchChannel(uint8_t area, uint8_t channel0);

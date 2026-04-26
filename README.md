@@ -28,14 +28,16 @@ It listens to DyNet traffic on RS485, maps lighting channels to MQTT topics, and
 
 ## LED Status Indicator
 
-If a GPIO pin is assigned to an LED in the Configuration page, the LED reflects the current network and MQTT state:
+The status LED reflects the device state via blink patterns:
 
-| LED Pattern | Meaning |
+| LED pattern | Meaning |
 |---|---|
-| Solid ON | Wi-Fi + MQTT connected (or Wi-Fi connected with no MQTT server configured) |
-| Double pulse — ●● pause ●● pause | Wi-Fi connected, waiting for MQTT broker |
-| Fast blink — 100 ms on / 100 ms off | Wi-Fi connecting, retries in progress |
-| Slow blink — 500 ms on / 1500 ms off | AP mode active — no Wi-Fi connection or all retries exhausted |
+| **Solid ON** | WiFi connected + MQTT connected (or no MQTT server configured) |
+| **Double pulse** — ●● pause ●● pause | WiFi connected, MQTT disconnecting / reconnecting |
+| **Fast blink** — 100 ms on / 100 ms off | WiFi connecting, retries in progress |
+| **Slow blink** — 500 ms on / 1500 ms off | AP mode only — no WiFi or all retries exhausted |
+
+> The LED pin and active-low logic are configurable on the **Config** page.
 
 ## Notes
 

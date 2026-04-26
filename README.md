@@ -26,7 +26,7 @@ It listens to DyNet traffic on RS485, maps lighting channels to MQTT topics, and
 - **Framework**: Arduino
 - **Dependencies**: PubSubClient, ArduinoJson, ESP Async WebServer, Async TCP library for the selected board
 
-## LED Status Indicator
+## Link Status LED
 
 The status LED reflects the device state via blink patterns:
 

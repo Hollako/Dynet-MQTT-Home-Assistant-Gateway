@@ -1,4 +1,4 @@
-# Dynet-MQTT-Home-Assistant-Gateway
+# Dynet to MQTT Home Assistant Gateway
 
 Dynet MQTT Home Assistant Gateways is firmware for ESP32/ESP8266 devices that bridges a Philips Dynalite/DyNet Bus to Home Assistant via MQTT.
 

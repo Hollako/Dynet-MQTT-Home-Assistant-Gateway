@@ -30,8 +30,10 @@ bool loadConfig() {
   if (doc.containsKey("ap_pass"))      apPass = String((const char*)doc["ap_pass"]);
   if (doc.containsKey("wifi_ssid"))    setStr(cfg.wifi_ssid,  sizeof(cfg.wifi_ssid),  String((const char*)doc["wifi_ssid"]));
   if (doc.containsKey("wifi_pass"))    setStr(cfg.wifi_pass,  sizeof(cfg.wifi_pass),  String((const char*)doc["wifi_pass"]));
-  if (doc.containsKey("wifi_ssid2"))   setStr(cfg.wifi_ssid2, sizeof(cfg.wifi_ssid2), String((const char*)doc["wifi_ssid2"]));
-  if (doc.containsKey("wifi_pass2"))   setStr(cfg.wifi_pass2, sizeof(cfg.wifi_pass2), String((const char*)doc["wifi_pass2"]));
+  if (doc.containsKey("wifi_ssid2"))      setStr(cfg.wifi_ssid2,      sizeof(cfg.wifi_ssid2),      String((const char*)doc["wifi_ssid2"]));
+  if (doc.containsKey("wifi_pass2"))      setStr(cfg.wifi_pass2,      sizeof(cfg.wifi_pass2),      String((const char*)doc["wifi_pass2"]));
+  if (doc.containsKey("last_ssid_name"))  setStr(cfg.last_ssid_name,  sizeof(cfg.last_ssid_name),  String((const char*)doc["last_ssid_name"]));
+  else cfg.last_ssid_name[0] = '\0';
   if (doc.containsKey("mqtt_server"))  setStr(cfg.mqtt_server, sizeof(cfg.mqtt_server), String((const char*)doc["mqtt_server"]));
   if (doc.containsKey("mqtt_port"))    cfg.mqtt_port = (int)doc["mqtt_port"];
   if (doc.containsKey("mqtt_user"))    setStr(cfg.mqtt_user, sizeof(cfg.mqtt_user), String((const char*)doc["mqtt_user"]));
@@ -63,8 +65,9 @@ bool saveConfig() {
   doc["ap_pass"]      = apPass;
   doc["wifi_ssid"]    = cfg.wifi_ssid;
   doc["wifi_pass"]    = cfg.wifi_pass;
-  doc["wifi_ssid2"]   = cfg.wifi_ssid2;
-  doc["wifi_pass2"]   = cfg.wifi_pass2;
+  doc["wifi_ssid2"]      = cfg.wifi_ssid2;
+  doc["wifi_pass2"]      = cfg.wifi_pass2;
+  doc["last_ssid_name"]  = cfg.last_ssid_name;
   doc["mqtt_server"]  = cfg.mqtt_server;
   doc["mqtt_port"]    = cfg.mqtt_port;
   doc["mqtt_user"]    = cfg.mqtt_user;

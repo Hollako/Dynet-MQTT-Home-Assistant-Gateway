@@ -103,8 +103,9 @@ struct AppConfig {
   uint8_t net_mode;            // 0=WiFi, 1=Ethernet
   char wifi_ssid[64];
   char wifi_pass[64];
-  char wifi_ssid2[64];   // fallback SSID (optional)
-  char wifi_pass2[64];   // fallback password
+  char wifi_ssid2[64];      // fallback SSID (optional)
+  char wifi_pass2[64];      // fallback password
+  char last_ssid_name[64];  // name of last successfully connected SSID (boot-slot hint)
   // MQTT
   char mqtt_server[64];
   int  mqtt_port;
@@ -139,6 +140,7 @@ extern volatile uint8_t     staDiscReason;
 extern String               staLastEvent;
 extern String               staTriedSsid;
 extern uint8_t              staRetries;
+extern uint8_t              staWhichSsid;   // 1 = primary, 2 = fallback
 extern unsigned long        lastStaChangeMs;
 
 bool isApPortalMode();
@@ -154,7 +156,7 @@ void startAP();
 void stopAP();
 void beginSTAIfCreds();
 void updateWiFiSM();
-void installWiFiDebugHandlers();
+void installWiFiHandlers();
 const char* reasonToStr(uint8_t r);
 
 // Ethernet (optional)

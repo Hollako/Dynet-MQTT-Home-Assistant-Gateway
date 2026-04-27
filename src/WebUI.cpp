@@ -107,6 +107,8 @@ static inline void pageBegin(const String& title) {
         "if(ws){ws.classList.remove('ok','warn','err','inactive'); ws.classList.add(b.rssi_pct>50?'ok':b.rssi_pct>20?'warn':'err');} "
         "const wt=ws?.querySelector('span:last-child');"
         "if(wt) wt.textContent = 'Wi-Fi: '+(b.sta_ssid||'?')+' ('+(b.rssi_pct||0)+'%)';"
+        "const ab=document.getElementById('apBadge');"
+        "if(ab){ab.classList.remove('ok','warn','err','inactive');ab.classList.add(b.ap_active?'ok':'err');}"
         "const a=document.getElementById('apText');"
         "if(a) a.textContent = b.ap_active ? ('AP: '+(b.ap_ssid||'')) : 'AP: Off';"
       "}"
@@ -172,7 +174,7 @@ static inline void pageBegin(const String& title) {
       "<div id='wifiSig'   class='badge inactive'><span class='dot'></span><span>Wi-Fi…</span></div>"
       "<div id='staBadge'  class='badge'><span class='dot'></span><span id='staText'>IP…</span></div>"
       "<div id='mqttBadge' class='badge'><span class='dot'></span><span id='mqttText'>MQTT…</span></div>"
-      "<div class='badge inactive'><span class='dot'></span><span id='apText'>AP…</span></div>"
+      "<div id='apBadge' class='badge inactive'><span class='dot'></span><span id='apText'>AP…</span></div>"
       "<div style='margin-left:auto'></div>"
       "<div class='badge inactive' style='color:var'>v")
   );
@@ -229,11 +231,28 @@ static String gpioOptions(int current) {
   o += gpioOpt(13,"D7", current);
   o += gpioOpt(15,"D8", current);
 #else
-  // ESP32 — list your preferred pins here
-  for (int p : {1,3,4,5,12,13,14,15,16,17,18,19,21,22,23,25,26,27,32,33}) {
-    String label = String("GPIO") + String(p);
-    o += gpioOpt(p, label.c_str(), current);
-  }
+  // ESP32 DevKit / WROOM-32 — descriptive labels; GPIO number appended by gpioOpt()
+  o += gpioOpt( 1, "TX0 ⚠️",  current);   // UART0 TX — shared with USB/Serial
+  o += gpioOpt( 3, "RX0 ⚠️",  current);   // UART0 RX — shared with USB/Serial
+  o += gpioOpt( 2, "LED ⚠️",  current);   // built-in LED — strapping pin, must be LOW at boot
+  o += gpioOpt( 4, "GPIO4",   current);
+  o += gpioOpt( 5, "GPIO5",   current);
+  o += gpioOpt(12, "GPIO12 ⚠️", current); // strapping pin — boot fails if HIGH
+  o += gpioOpt(13, "GPIO13",  current);
+  o += gpioOpt(14, "GPIO14",  current);
+  o += gpioOpt(15, "GPIO15 ⚠️", current); // strapping pin
+  o += gpioOpt(16, "RX2",     current);   // UART2 RX
+  o += gpioOpt(17, "TX2",     current);   // UART2 TX
+  o += gpioOpt(18, "SCK",     current);   // SPI clock
+  o += gpioOpt(19, "MISO",    current);   // SPI
+  o += gpioOpt(21, "SDA",     current);   // I2C data
+  o += gpioOpt(22, "SCL",     current);   // I2C clock
+  o += gpioOpt(23, "MOSI",    current);   // SPI
+  o += gpioOpt(25, "GPIO25",  current);   // DAC1
+  o += gpioOpt(26, "GPIO26",  current);   // DAC2
+  o += gpioOpt(27, "GPIO27",  current);
+  o += gpioOpt(32, "GPIO32",  current);
+  o += gpioOpt(33, "GPIO33",  current);
 #endif
   return o;
 }
@@ -1126,7 +1145,6 @@ void handleConfigGet() {
   // Save row
   pageWrite(F("<div class='form-inline' style='margin-top:10px'>"
                 "<button class='btn' type='submit'>Save & Reboot</button>"
-                "<a class='btn' href='/'>Back</a>"
               "</div></form>"));
 
   // Actions
@@ -1582,8 +1600,8 @@ static void handleFwGet() {
         // Status line
         "var isNewer=_cmp(tag,_cur.replace(/^v/,''))>0;"
         "st.innerHTML=isNewer"
-          "?\"<span style='color:#f59e0b;font-weight:600;font-size:15px'>&#9650; New version available - click Download to get the firmware, Choose the file and click Flash</span>\""
-          ":'<span style=\"color:#19c37d\">&#10003; Firmware is up to date</span>';"
+          "?\"<span style='color:#f59e0b;font-weight:600;font-size:16px'>&#9650; New version available - click Download to get the firmware, Choose the file and click Flash</span>\""
+          ":'<span style=\"color:#19c37d;font-weight:600;font-size:16px\">&#10003; Firmware is up to date</span>';"
       "})"
       ".catch(function(){st.innerHTML='<span style=\"color:#aaa\">Version check failed</span>';});"
     "})();"

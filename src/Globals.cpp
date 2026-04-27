@@ -3,7 +3,7 @@
 // -------------------- HA metadata --------------------
 const char* HA_MANUFACTURER = "SmartWay";
 const char* HA_MODEL        = "ESPDynetGateway";
-const char* HA_SW_VERSION   = "1.9";
+const char* HA_SW_VERSION   = "2.1";
 
 // -------------------- EEPROM device_id magic ----------------
 const uint32_t DEV_ID_MAGIC = 0x44594E54; // 'DYNT'
@@ -50,7 +50,8 @@ volatile wl_status_t staStatus = WL_IDLE_STATUS;
 volatile uint8_t     staDiscReason = 0;
 String               staLastEvent = "";
 String               staTriedSsid = "";
-uint8_t              staRetries = 0;
+uint8_t              staRetries   = 0;
+uint8_t              staWhichSsid = 1;
 unsigned long        lastStaChangeMs = 0;
 
 bool           apActive = false;

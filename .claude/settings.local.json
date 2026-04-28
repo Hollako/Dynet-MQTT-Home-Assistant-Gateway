@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(dir \"C:\\\\Users\\\\L\\\\OneDrive\\\\Documents\\\\GitHub\\\\Dynet-MQTT-Home-Assistant-Gateway\\\\src\")",
-      "Bash(dir \"C:\\\\Users\\\\L\\\\OneDrive\\\\Documents\\\\GitHub\\\\Dynet-MQTT-Home-Assistant-Gateway\\\\include\")"
-    ]
-  }
-}

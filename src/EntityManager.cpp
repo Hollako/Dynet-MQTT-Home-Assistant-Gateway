@@ -237,18 +237,24 @@ void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   // HVAC areas: map preset to mode/fan state, skip preset entity + level requests
   if (a >= 0 && _areas[a].areaType == AREA_HVAC && _areas[a].hvac) {
     auto& h = *_areas[a].hvac;
-    for (uint8_t i = 0; i < h.modeCount; i++) {
+    // Use MAX_HVAC_MODES (not modeCount) so we never skip entries left sparse by deletions
+    for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
       if (h.modes[i].used && h.modes[i].preset1 == preset0 + 1) {
         strncpy(h.currentMode, h.modes[i].name, sizeof(h.currentMode) - 1);
         h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+        LOGF("[HVAC] A%u preset P%u -> mode '%s'\n", area, preset0 + 1, h.currentMode);
       }
     }
-    for (uint8_t i = 0; i < h.fanCount; i++) {
+    for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
       if (h.fanModes[i].used && h.fanModes[i].preset1 == preset0 + 1) {
         strncpy(h.currentFanMode, h.fanModes[i].name, sizeof(h.currentFanMode) - 1);
         h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+        LOGF("[HVAC] A%u preset P%u -> fan '%s'\n", area, preset0 + 1, h.currentFanMode);
       }
     }
+    LOGF("[HVAC] A%u notePreset P%u: mode='%s' fan='%s' -> publishing\n",
+         area, preset0 + 1, h.currentMode[0] ? h.currentMode : "(none)",
+         h.currentFanMode[0] ? h.currentFanMode : "(none)");
     publishSensorsForArea(area);  // publishes temp + setpoint + mode + fan state
     saveEntities();
     return;
@@ -357,6 +363,24 @@ bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
 
   // -------- Variant B: opcode in b[2] --------
 
+  // Legacy preset recall: [1C][Area][00][Code][Fade][Bank][Join][Chk]
+  // Used by physical Dynalite panels (same code→index mapping as 0x64).
+  // idxFrom64Code() returns -1 for unknown codes (e.g. 0x63 = requestPreset query), so
+  // those fall through harmlessly.
+  if (b[2] == 0x00) {
+    const uint8_t code = b[3];
+    const uint8_t bank = b[5];
+    int8_t idx = idxFrom64Code(code);
+    if (idx >= 0) {
+      uint8_t preset0 = (uint8_t)(bank * 8 + idx);
+      noteReportPreset(area, preset0);
+      dynet.scheduleAreaLevelReqs(area, 400);
+      LOGF("[DyNet] A%u preset(0x00)->P%u; scheduled level refresh\n", area, preset0 + 1);
+      return true;
+    }
+    return false;
+  }
+
   // Recall Preset with bank: [1C][Area][64][Code][Fade/??][Bank][Join][Chk]
   if (b[2] == 0x64) {
     const uint8_t code = b[3];   // 00,01,02,03,0A,0B,0C,0D
@@ -405,7 +429,17 @@ bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
       noteReportPreset(area, preset0);
       return true;
     }
-    case 0x4A: { // User Preference: [1C][Area][Sel][4A][D2][D3]...
+    case 0x48: { // User Preference Write: [1C][Area][Pref][48][Hi][Lo][Join][Chk]
+      // Sent by physical panels (and by us) when writing a preference value.
+      // We snoop our own bus traffic so we can keep state in sync when a panel changes the setpoint.
+      uint8_t pref = b[2];
+      uint8_t d2   = b[4], d3 = b[5];
+      if (pref == 0x07) { noteSetpoint_q025(area, (int16_t)((d2<<8)|d3)); return true; } // setpoint q0.25
+      if (pref == 0x0D) { noteSetpoint_fp  (area, d2, d3); return true; }                // setpoint fp
+      return false;
+    }
+    case 0x4A: { // User Preference Report: [1C][Area][Pref][4A][Hi][Lo][Join][Chk]
+      // Controller response to a 0x49 query — or unsolicited broadcast.
       uint8_t pref = b[2];
       uint8_t d2   = b[4], d3 = b[5];
       if (pref == 0x06) { noteActualTemp_q025(area, (int16_t)((d2<<8)|d3)); return true; } // actual temp q0.25

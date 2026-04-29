@@ -93,7 +93,9 @@ void DynetBus::loop() {
     const uint8_t want = checksum(_rxBuf);
 
     if (want == _rxBuf[7]) {
-    DynetEntities::em.handleLogicalFrame(_rxBuf);
+      LOGF("[DyNet RX] %02X %02X %02X %02X %02X %02X %02X %02X\n",
+           _rxBuf[0],_rxBuf[1],_rxBuf[2],_rxBuf[3],_rxBuf[4],_rxBuf[5],_rxBuf[6],_rxBuf[7]);
+      DynetEntities::em.handleLogicalFrame(_rxBuf);
 
     } else {
       // Keep a useful log for diagnosing checksum/framing

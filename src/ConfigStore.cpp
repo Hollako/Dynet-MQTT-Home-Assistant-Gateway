@@ -289,20 +289,54 @@ bool loadEntities() {
 bool saveEntities() {
   using namespace DynetEntities;
 
+  // ── Debounce: coalesce rapid successive calls into one write ───────────
+  // Temp/setpoint/preset events can arrive in bursts. Deferring up to 10 s
+  // keeps heap pressure low and reduces LittleFS wear.
+  static unsigned long pendingAt  = 0;   // millis() of first deferred request
+  static bool          pending    = false;
+  const unsigned long  DEBOUNCE_MS = 10000UL;
+
+  unsigned long now = millis();
+  if (!pending) {
+    pending   = true;
+    pendingAt = now;
+  }
+  if ((int32_t)(now - pendingAt) < (int32_t)DEBOUNCE_MS) {
+    return true;   // deferred — not an error
+  }
+  pending = false;  // this call will actually write
+
   // ── Build JSON doc BEFORE opening the file ─────────────────────────────
   // CRITICAL: LittleFS.open("w") truncates the file immediately. If we open
   // first and then fail (OOM, overflow), the existing entities.json is wiped
   // and all config is lost on next reboot. Build + validate first, write last.
-  // ESP8266: 10 KB matches the load doc and fits in the fragmented post-WiFi heap.
 #if defined(ESP32)
-  DynamicJsonDocument doc(65536);
+  static const size_t DOC_SIZE = 65536;
 #else
-  DynamicJsonDocument doc(10240);
+  // Actual serialised output is ~1.5 KB; ArduinoJson needs ~3-4× for its
+  // internal node pool. 6 KB fits a heavily-fragmented post-WiFi/MQTT heap
+  // much more reliably than 10 KB while still leaving headroom for growth.
+  static const size_t DOC_SIZE = 6144;
 #endif
+
+  // Pre-flight: reject if free heap is too tight to safely malloc the doc
+#if defined(ESP8266)
+  if (ESP.getFreeHeap() < (DOC_SIZE + 4096)) {
+    LOGF("[persist] saveEntities: heap low (%u B free) — deferred\n",
+         (unsigned)ESP.getFreeHeap());
+    pending   = true;   // retry next time saveEntities() is called
+    pendingAt = now;
+    return false;
+  }
+#endif
+
+  DynamicJsonDocument doc(DOC_SIZE);
 
   // Guard: if malloc failed (heap fragmentation), capacity == 0
   if (doc.capacity() == 0) {
     LOGF("[persist] saveEntities: OOM — doc malloc failed, keeping old file\n");
+    pending   = true;   // retry next call
+    pendingAt = now;
     return false;
   }
 

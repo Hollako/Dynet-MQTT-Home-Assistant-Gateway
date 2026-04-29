@@ -82,6 +82,7 @@ static inline void pageBegin(const String& title) {
       ".form-table{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px 14px;align-items:center}"
       "@media(max-width:640px){.form-table{grid-template-columns:120px minmax(0,1fr)}}"
       ".form-inline{display:flex;gap:10px;align-items:center;flex-wrap:wrap}"
+      ".sec-hdr{font-size:16px;font-weight:700;margin:0 0 12px}"
       ".wide{width:100%}"
       "input.in, select.in { box-sizing:border-box; }"
       "button.btn { padding: 10px 16px; min-height: 38px; line-height: 1.2; font-size: 14px; }"
@@ -712,16 +713,22 @@ void handleRootGet() {
         pageWrite(F("</span>"));
         // HVAC live status pills — kept in header so pollAreas() always sees them
         if (as.areaType == DynetEntities::AREA_HVAC) {
+          pageWrite(F("<span style='font-size:11px;color:var(--muted)'>Temperature:</span>"));
           pageWrite(F("<span class='pill' id='hvac_temp_A")); pageWrite(String(as.area));
           if (as.hasTemp) { pageWrite(F("'>")); pageWrite(String(as.tempC,1)); pageWrite(F("\xC2\xB0\x43</span>")); }
           else            { pageWrite(F("' style='color:var(--muted)'>\xE2\x80\x93\xC2\xB0\x43</span>")); }
+          pageWrite(F("<span style='font-size:11px;color:var(--muted)'>Setpoint:</span>"));
           pageWrite(F("<span class='pill' id='hvac_sp_A")); pageWrite(String(as.area));
           if (as.hasSetpt) { pageWrite(F("'>")); pageWrite(String(as.setptC,1)); pageWrite(F("\xC2\xB0\x43</span>")); }
           else             { pageWrite(F("' style='color:var(--muted)'>\xE2\x80\x93\xC2\xB0\x43</span>")); }
-          pageWrite(F("<span class='pill' id='hvac_mode_A")); pageWrite(String(as.area)); pageWrite(F("'>"));
-          if (as.hvac && as.hvac->currentMode[0]) pageWrite(String(as.hvac->currentMode));
-          else pageWrite(F("\xE2\x80\x93"));
-          pageWrite(F("</span>"));
+          if (as.hvac && as.hvac->currentMode[0]) {
+            pageWrite(F("<span class='pill' id='hvac_mode_A")); pageWrite(String(as.area)); pageWrite(F("'>"));
+            pageWrite(String(as.hvac->currentMode));
+            pageWrite(F("</span>"));
+          } else {
+            // Hidden placeholder so JS polling can still update it once a mode is known
+            pageWrite(F("<span class='pill' id='hvac_mode_A")); pageWrite(String(as.area)); pageWrite(F("' style='display:none'></span>"));
+          }
         }
       pageWrite(F("</div>")); // left group
 
@@ -826,7 +833,7 @@ void handleRootGet() {
         "const hs=document.getElementById('hvac_sp_A'+id);"
         "if(hs)hs.textContent=(a.hasSetpt && typeof a.setptC==='number')?a.setptC.toFixed(1)+'°C':'–°C';"
         "const hm=document.getElementById('hvac_mode_A'+id);"
-        "if(hm && a.hvacMode)hm.textContent=a.hvacMode;"
+        "if(hm && a.hvacMode){hm.textContent=a.hvacMode;hm.style.display='';}"
       "}"
     "}"
     "function pollAreas(){"
@@ -1029,42 +1036,164 @@ void handleConfigGet() {
   pageWrite(F("<h1>Configuration</h1>"));
   pageWrite(F("<form id='cfg' class='form' method='POST' action='/config'>"));
 
-  // Device
-  pageWrite(F("<div class='card'><div class='form-table'>"));
+  // Device card — 2-column layout
+  // Left: Device ID + RS485 pins   Right: Link LED + Reset Button
+  pageWrite(F("<div class='card'>"));
+  pageWrite(F("<p class='sec-hdr'>Device</p>"));
+  pageWrite(F("<div style='display:grid;grid-template-columns:1fr 1fr;gap:0 28px;align-items:start'>"));
+  
+  // ── Left column ───────────────────────────────────────────────────────────
+  pageWrite(F("<div class='form-table'>"));
   pageWrite(F("<div>Device ID</div><div><input class='in' name='device_id' type='text' value='"));
   pageWrite(deviceId);
   pageWrite(F("'></div>"));
-
-  // RS485 Tx GPIO
-  pageWrite(F("<div class='lbl'>RS485 Tx GPIO</div><div class='ctl'><select class='in' name='tx_pin'>"));
+  pageWrite(F("<div>RS485 Tx GPIO</div><div><select class='in' name='tx_pin'>"));
   pageWrite(gpioOptions(txPin));
   pageWrite(F("</select></div>"));
-
-  // RS485 Rx GPIO
-  pageWrite(F("<div class='lbl'>RS485 Rx GPIO</div><div class='ctl'><select class='in' name='rx_pin'>"));
+  pageWrite(F("<div>RS485 Rx GPIO</div><div><select class='in' name='rx_pin'>"));
   pageWrite(gpioOptions(rxPin));
   pageWrite(F("</select></div>"));
-
-  // RS485 DE/RE GPIO (optional)
-  pageWrite(F("<div class='lbl'>RS485 DE/RE GPIO</div><div class='ctl'><select class='in' name='de_pin'>"));
+  pageWrite(F("<div>RS485 DE/RE GPIO</div><div><select class='in' name='de_pin'>"));
   pageWrite(gpioOptions(dePin));
-  pageWrite(F("</select><div class='muted'>Set to None if your MAX485 auto‑controls DE/RE.</div></div>"));
+  pageWrite(F("</select><div class='muted'>Set to None if your MAX485 auto&#8209;controls DE/RE.</div></div>"));
+  pageWrite(F("</div>")); // /left
 
-    // DyNet limits
+  // ── Right column ──────────────────────────────────────────────────────────
+  pageWrite(F("<div class='form-table'>"));
+  pageWrite(F("<div>Link LED</div><div><select class='in' name='led_pin'>"));
+  pageWrite(gpioOptions(ledPin));
+  pageWrite(F("</select><label style='margin-left:8px'><input type='checkbox' name='led_invert' "));
+  if (ledActiveLow) pageWrite(F("checked"));
+  pageWrite(F("> Active low</label></div>"));
+  pageWrite(F("<div>Reset Button</div><div><select class='in' name='btn_pin'>"));
+  pageWrite(gpioOptions(buttonPin));
+  pageWrite(F("</select><label style='margin-left:8px'><input type='checkbox' name='btn_invert' "));
+  if (buttonActiveLow) pageWrite(F("checked"));
+  pageWrite(F("> Use internal pull-up (hold 15s)</label></div>"));
+  pageWrite(F("</div>")); // /right
+
+  pageWrite(F("</div>")); // /grid
+  pageWrite(F("</div>")); // /card
+
+  // DyNet limits (declared here, used in both the Dynalite Parameters card and the Actions card)
   uint8_t defCh = cfg.dynet_max_channels ? cfg.dynet_max_channels : (uint8_t)DYNET_MAX_CHANNELS;
-  //uint8_t defAr = cfg.dynet_max_areas    ? cfg.dynet_max_areas    : (uint8_t)DYNET_MAX_AREAS;
-  uint8_t defAr = cfg.dynet_max_areas ? cfg.dynet_max_areas : (uint8_t)DYNET_MAX_AREAS;
+  uint8_t defAr = cfg.dynet_max_areas    ? cfg.dynet_max_areas    : (uint8_t)DYNET_MAX_AREAS;
 
-  pageWrite(F("<div>DyNet Max Channels</div><div>"
+  // Wi-Fi card
+  #define W2COL "display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;align-items:start"
+  #define FLBL  "font-size:13px;font-weight:600;margin-bottom:4px"
+
+  pageWrite(F("<div class='card'>"));
+  pageWrite(F("<p class='sec-hdr'>WiFi</p>"));
+
+  // ── SSID 1 ───────────────────────────────────────────────────────────────
+  pageWrite(F("<div style='" W2COL "'>"));
+  pageWrite(F("<div><div style='" FLBL "'>SSID 1 Network</div>"
+              "<div style='display:flex;gap:6px;align-items:center'>"
+              "<input class='in' id='staSsid' name='wifi_ssid' type='text' required value='"));
+  pageWrite(String(cfg.wifi_ssid));
+  pageWrite(F("'>"
+              "<select class='in' id='ssidSelect' style='min-width:140px'>"
+              "<option value=''>Select from scan</option></select>"
+              "<button id='scanBtn' class='btn' type='button' onclick='doScan()'>Scan</button>"
+              "</div></div>"));
+  pageWrite(F("<div><div style='" FLBL "'>SSID 1 Password</div>"
+              "<input class='in' name='wifi_pass' type='password' style='width:100%' value='"));
+  pageWrite(String(cfg.wifi_pass));
+  pageWrite(F("'></div>"));
+  pageWrite(F("</div>")); // /SSID1 row
+
+  // ── SSID 2 ───────────────────────────────────────────────────────────────
+  pageWrite(F("<div style='" W2COL ";margin-top:14px'>"));
+  pageWrite(F("<div><div style='" FLBL "'>SSID 2 Network</div>"
+              "<input class='in' name='wifi_ssid2' type='text' "
+              "placeholder='Leave blank to disable' style='width:100%' value='"));
+  pageWrite(String(cfg.wifi_ssid2));
+  pageWrite(F("'></div>"));
+  pageWrite(F("<div><div style='" FLBL "'>SSID 2 Password</div>"
+              "<input class='in' name='wifi_pass2' type='password' "
+              "placeholder='Leave blank for open network' style='width:100%' value='"));
+  pageWrite(String(cfg.wifi_pass2));
+  pageWrite(F("'></div>"));
+  pageWrite(F("</div>")); // /SSID2 row
+
+  // ── AP ───────────────────────────────────────────────────────────────────
+  pageWrite(F("<div style='" W2COL ";margin-top:14px'>"));
+  pageWrite(F("<div><div style='" FLBL "'>AP SSID</div>"
+              "<input class='in' name='ap_ssid' type='text' required style='width:100%' value='"));
+  pageWrite(apSsid);
+  pageWrite(F("'><div class='muted' style='margin-top:3px'>Auto-set from Device ID</div></div>"));
+  pageWrite(F("<div><div style='" FLBL "'>AP Password</div>"
+              "<input class='in' name='ap_pass' type='password' style='width:100%' value='"));
+  pageWrite(apPass);
+  pageWrite(F("'></div>"));
+  pageWrite(F("</div>")); // /AP row
+
+  #undef W2COL
+  #undef FLBL
+  pageWrite(F("</div>")); // /WiFi card
+
+  // MQTT — 2-column layout
+  #define M2COL "display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;align-items:start"
+  #define MLBL  "font-size:13px;font-weight:600;margin-bottom:4px"
+
+  pageWrite(F("<div class='card'>"));
+  pageWrite(F("<p class='sec-hdr'>MQTT</p>"));
+
+  // Row 1: Server + Port
+  pageWrite(F("<div style='" M2COL "'>"));
+  pageWrite(F("<div><div style='" MLBL "'>Server</div>"
+              "<input class='in' name='mqtt_server' type='text' required style='width:100%' value='"));
+  if (mqtt.connected()) pageWrite(String(cfg.mqtt_server));
+  pageWrite(F("'></div>"));
+  pageWrite(F("<div><div style='" MLBL "'>Port</div>"
+              "<input class='in' name='mqtt_port' type='number' required min='1' max='65535' style='width:100%' value='"));
+  if (mqtt.connected()) pageWrite(String(cfg.mqtt_port));
+  pageWrite(F("'></div>"));
+  pageWrite(F("</div>")); // /row1
+
+  // Row 2: Username + Password
+  pageWrite(F("<div style='" M2COL ";margin-top:8px'>"));
+  pageWrite(F("<div><div style='" MLBL "'>Username</div>"
+              "<input class='in' name='mqtt_user' type='text' style='width:100%' value='"));
+  if (mqtt.connected()) pageWrite(String(cfg.mqtt_user));
+  pageWrite(F("'></div>"));
+  pageWrite(F("<div><div style='" MLBL "'>Password</div>"
+              "<input class='in' name='mqtt_pass' type='password' style='width:100%' value='"));
+  if (mqtt.connected()) pageWrite(String(cfg.mqtt_pass));
+  pageWrite(F("'></div>"));
+  pageWrite(F("</div>")); // /row2
+
+  // Row 3: HA Discovery + Web Log
+  pageWrite(F("<div style='" M2COL ";margin-top:8px'>"));
+  pageWrite(F("<div><div style='" MLBL "'>Home Assistant</div>"
+              "<label><input name='ha_discovery' type='checkbox' "));
+  if (cfg.ha_discovery) pageWrite(F("checked"));
+  pageWrite(F("> Enable Discovery</label></div>"));
+  pageWrite(F("<div><div style='" MLBL "'>Web Log</div>"
+              "<label><input name='log_web' type='checkbox' "));
+  if (cfg.log_web) pageWrite(F("checked"));
+  pageWrite(F("> Enable</label></div>"));
+  pageWrite(F("</div>")); // /row3
+
+  #undef M2COL
+  #undef MLBL
+  pageWrite(F("</div>")); // /MQTT card
+
+  // Dynalite Parameters card
+  pageWrite(F("<div class='card'>"));
+  pageWrite(F("<p class='sec-hdr'>Dynalite Parameters</p>"));
+  pageWrite(F("<div class='form-table'>"));
+  pageWrite(F("<div>Max Channels</div><div>"
               "<input class='in' name='dynet_max_channels' type='number' min='1' max='"));
-  pageWrite(String((int)DYNET_MAX_CHANNELS));  // enforced by compile-time cap (16 on ESP8266, 8 default)
+  pageWrite(String((int)DYNET_MAX_CHANNELS));
   pageWrite(F("' value='"));
   pageWrite(String(defCh));
-  pageWrite(F("'><div class='muted'>Channels probed per area during sweep (e.g. 16 = check channels 1&ndash;16 in every area).</div></div>"));
-
-  pageWrite(F("<div>DyNet Max Areas</div><div>"
+  pageWrite(F("'><div class='muted'>Channels probed per area during sweep "
+              "(e.g. 16 = check channels 1&ndash;16 in every area).</div></div>"));
+  pageWrite(F("<div>Max Areas</div><div>"
               "<input class='in' name='dynet_max_areas' type='number' min='2' max='"));
-  pageWrite(String((int)DYNET_MAX_AREAS));   // 32 on ESP8266, 64 on ESP32 — from compile-time constant
+  pageWrite(String((int)DYNET_MAX_AREAS));
   pageWrite(F("' value='"));
   pageWrite(String(defAr));
 #if defined(ESP8266)
@@ -1072,92 +1201,32 @@ void handleConfigGet() {
 #else
   pageWrite(F("'><div class='muted'>Highest area number to store and sweep (1..N).</div></div>"));
 #endif
+  pageWrite(F("</div>")); // /form-table
 
-  
-  // LED
-  pageWrite(F("<div>Link LED</div><div><select class='in' name='led_pin'>"));
-  pageWrite(gpioOptions(ledPin));
-  pageWrite(F("</select><label style='margin-left:8px'><input type='checkbox' name='led_invert' "));
-  if (ledActiveLow) pageWrite(F("checked"));
-  pageWrite(F("> Active low</label></div>"));
+  // Action buttons inside the Dynalite Parameters card
+  pageWrite(F("<div class='row' style='margin-top:14px;gap:8px;flex-wrap:wrap'>"));
+  pageWrite(F("<button class='btn action' onclick=\"fetch('/api/global_req',{method:'POST',"
+              "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+              "body:'do=req_all_levels'})\">Request All Levels (All Areas)</button>"));
+  pageWrite(F("<button class='btn action' onclick=\"fetch('/api/poll_all',{method:'POST',"
+              "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'do=start'})"
+              ".then(()=>alert('Area sweep started (2.."));
+  pageWrite(String(defAr));
+  pageWrite(F(")')).catch(()=>alert('Failed'))\">Poll Areas • Sweep 2.."));
+  pageWrite(String(defAr));
+  pageWrite(F("</button>"));
+  pageWrite(F("<a class='btn' href='/import' "
+              "title='Import area/channel names from Dynalite LogicalExport XML'>"
+              "&#x2B07; Import from XML</a>"));
+  pageWrite(F("</div>")); // /row
 
-  // Button
-  pageWrite(F("<div>Reset Button</div><div><select class='in' name='btn_pin'>"));
-  pageWrite(gpioOptions(buttonPin));
-  pageWrite(F("</select><label style='margin-left:8px'><input type='checkbox' name='btn_invert' "));
-  if (buttonActiveLow) pageWrite(F("checked"));
-  pageWrite(F("> Use internal pull-up (hold 15s)</label></div>"));
-
-  pageWrite(F("</div></div>")); // /card
-
-  // Wi-Fi
-  pageWrite(F("<div class='card'><div class='form-table'>"));
-  pageWrite(F("<div>Wi‑Fi SSID (STA)</div><div>"
-              "<input class='in' id='staSsid' name='wifi_ssid' type='text' required value='"));
-  pageWrite(String(cfg.wifi_ssid));
-  pageWrite(F("'> <select class='in' id='ssidSelect'><option value=''> Select from scan </option></select>"
-              " <button id='scanBtn' class='btn' type='button' onclick='doScan()'>Scan</button>"
-              "</div>"));
-
-  pageWrite(F("<div>Wi‑Fi Password</div><div><input class='in' name='wifi_pass' type='password' value='"));
-  pageWrite(String(cfg.wifi_pass));
-  pageWrite(F("'></div>"));
-
-  pageWrite(F("<div>Fallback SSID</div><div><input class='in' name='wifi_ssid2' type='text' placeholder='optional' value='"));
-  pageWrite(String(cfg.wifi_ssid2));
-  pageWrite(F("'></div>"));
-  pageWrite(F("<div>Fallback Password</div><div><input class='in' name='wifi_pass2' type='password' value='"));
-  pageWrite(String(cfg.wifi_pass2));
-  pageWrite(F("'></div>"));
-
-  // AP
-  pageWrite(F("<div>AP SSID</div><div><input class='in' name='ap_ssid' type='text' required value='"));
-  pageWrite(apSsid);
-  pageWrite(F("'></div>"));
-  pageWrite(F("<div>AP Password</div><div><input class='in' name='ap_pass' type='password' value='"));
-  pageWrite(apPass);
-  pageWrite(F("'></div>"));
-
-  pageWrite(F("</div></div>"));
-
-  // MQTT
-  pageWrite(F("<div class='card'><div class='form-table'>"));
-  pageWrite(F("<div>MQTT Server</div><div><input class='in' name='mqtt_server' type='text' required value='"));
-  if (mqtt.connected()) pageWrite(String(cfg.mqtt_server));
-  pageWrite(F("'></div>"));
-  pageWrite(F("<div>MQTT Port</div><div><input class='in' name='mqtt_port' type='number' required min='1' max='65535' value='"));
-  if (mqtt.connected()) pageWrite(String(cfg.mqtt_port));
-  pageWrite(F("'></div>"));
-  pageWrite(F("<div>MQTT User</div><div><input class='in' name='mqtt_user' type='text' value='"));
-  if (mqtt.connected()) pageWrite(String(cfg.mqtt_user));
-  pageWrite(F("'></div>"));
-  pageWrite(F("<div>MQTT Password</div><div><input class='in' name='mqtt_pass' type='password' value='"));
-  if (mqtt.connected()) pageWrite(String(cfg.mqtt_pass));
-  pageWrite(F("'></div>"));
-  pageWrite(F("<div>Home Assistant</div><div><label><input name='ha_discovery' type='checkbox' "));
-  if(cfg.ha_discovery) pageWrite(F("checked"));
-  pageWrite(F("> Enable Discovery</label></div>"));
-  pageWrite(F("<div>Web Log</div><div><label><input name='log_web' type='checkbox' "));
-  if(cfg.log_web) pageWrite(F("checked"));
-  pageWrite(F("> Enable</label></div>"));
-  pageWrite(F("</div></div>"));
+  pageWrite(F("</div>")); // /Dynalite Parameters card
 
   // Save row
   pageWrite(F("<div class='form-inline' style='margin-top:10px'>"
                 "<button class='btn' type='submit'>Save & Reboot</button>"
               "</div></form>"));
 
-  // Actions
-  pageWrite(F("<div class='card'>"
-              "<div class='row'>"
-                "<button class='btn action' onclick=\"fetch('/api/global_req',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'do=req_all_levels'})\">Request All Levels (All Areas)</button>"));
-  pageWrite(F("<button class='btn action' onclick=\"fetch('/api/poll_all',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'do=start'}) .then(()=>alert('Area sweep started (2.."));
-  pageWrite(String(defAr));
-  pageWrite(F(")')).catch(()=>alert('Failed'))\">Poll Areas • Sweep 2.."));
-  pageWrite(String(defAr));
-  pageWrite(F("</button>"));
-  pageWrite(F("<a class='btn' href='/import' title='Import area/channel names from Dynalite LogicalExport XML'>&#x2B07; Import from XML</a>"));
-  pageWrite(F("</div></div>"));
 
   // Backup / Restore
   pageWrite(F("<div class='card'>"

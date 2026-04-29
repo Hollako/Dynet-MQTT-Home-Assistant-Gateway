@@ -98,9 +98,12 @@ struct AreaState {
 };
 
 // Hard limits — config values are clamped to these at runtime.
-// On ESP8266: keep low to protect heap. On ESP32: can be raised via build flags.
 #ifndef DYNET_MAX_CHANNELS
-#  define DYNET_MAX_CHANNELS 8    // channels probed per area during sweep
+#  if defined(ESP8266)
+#    define DYNET_MAX_CHANNELS 16   // ESP8266: up to 16 channels per area
+#  else
+#    define DYNET_MAX_CHANNELS 64   // ESP32: generous cap, no heap concern
+#  endif
 #endif
 #ifndef DYNET_MAX_AREAS
 #  if defined(ESP8266)

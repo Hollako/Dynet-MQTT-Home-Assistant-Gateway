@@ -101,6 +101,12 @@ struct AppConfig {
   char device_id[32];
   // Network
   uint8_t net_mode;            // 0=WiFi, 1=Ethernet
+  // Ethernet PHY (ESP32 only; ignored on ESP8266)
+  uint8_t eth_phy_type;        // 0=LAN8720, 1=IP101, 2=RTL8201, 3=DP83848
+  uint8_t eth_phy_addr;        // PHY MDIO address (0 or 1, board-dependent)
+  int8_t  eth_power_pin;       // power-enable GPIO, -1 = not used
+  int8_t  eth_mdc_pin;         // MDC  GPIO (LAN8720 default = 23)
+  int8_t  eth_mdio_pin;        // MDIO GPIO (LAN8720 default = 18)
   char wifi_ssid[64];
   char wifi_pass[64];
   char wifi_ssid2[64];      // fallback SSID (optional)

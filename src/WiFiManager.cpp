@@ -328,7 +328,17 @@ void wifiSetup() {
 
   installWiFiHandlers();
   startAP();
-  beginSTAIfCreds();
+  // Skip STA connect when Ethernet is the active network interface
+  if (cfg.net_mode != NET_ETHERNET) {
+    beginSTAIfCreds();
+  } else {
+    LOGLN("[WIFI] Ethernet mode — WiFi STA connect skipped (AP only)");
+  }
 }
 
-void wifiLoop() { updateWiFiSM(); }
+void wifiLoop() {
+  // In Ethernet mode the WiFi state machine would constantly retry STA —
+  // suppress it; the AP stays up for config access.
+  if (cfg.net_mode == NET_ETHERNET) return;
+  updateWiFiSM();
+}

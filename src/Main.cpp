@@ -49,8 +49,14 @@ void setup() {
   applyLedPin();
   applyButtonPin();
 
-  // Setup WiFi (brings up AP immediately and tries STA)
+  // Setup network — WiFi always starts AP; Ethernet added when configured
   wifiSetup();
+#if defined(ESP32) && defined(ETHERNET_SUPPORTED)
+  if (cfg.net_mode == NET_ETHERNET) {
+    ethSetup();
+    LOGLN("[ETH] Ethernet mode active — WiFi STA disabled");
+  }
+#endif
 
   // Start MQTT (non-blocking) and try a first connection
   mqttSetup();
@@ -80,6 +86,9 @@ void loop() {
   // WiFi state machine (keeps AP/STA logic running)
   wifiLoop();
 
+  // Ethernet loop (event-driven, no-op when not in ETH mode)
+  ethLoop();
+
   // MQTT client (connect/retry + HA discovery pacing)
   mqttLoop();
 
@@ -107,6 +116,9 @@ void loop() {
 
   // Curtain state-machine: interlocking delays + travel-time auto-stop
   DynetEntities::em.pollCurtains();
+
+  // Flush any pending entity saves (debounced — fires 8 s after last change)
+  serviceEntitiesSave();
 
   // Handle scheduled reboot (used by Save & Reboot, restore, etc.)
   serviceScheduledReboot();

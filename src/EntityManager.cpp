@@ -207,7 +207,49 @@ void EntityManager::setChannelLevel(uint8_t area, uint8_t channel0, uint8_t pct)
   if (i >= 0) {
     _channels[i].levelPct = pct;
     _channels[i].isOn = (pct > 0);
-    publishStateForChannel(i);              // NEW
+    publishStateForChannel(i);
+  }
+  // Check if any HVAC area uses this channel as a level-based mode/fan source
+  checkHvacLevelSources(area, channel0, pct);
+}
+
+void EntityManager::checkHvacLevelSources(uint8_t area, uint8_t ch0, uint8_t pct) {
+  for (int i = 0; i < _arCount; i++) {
+    if (!_areas[i].present || _areas[i].areaType != AREA_HVAC || !_areas[i].hvac) continue;
+    auto& h      = *_areas[i].hvac;
+    uint8_t hvacArea   = _areas[i].area;
+    uint8_t modeTarget = h.modeArea ? h.modeArea : hvacArea;
+    uint8_t fanTarget  = h.fanArea  ? h.fanArea  : hvacArea;
+    bool changed = false;
+
+    if (h.modeCtrlType == HVAC_CTRL_LEVEL && modeTarget == area && h.modeChannel0 == ch0) {
+      for (uint8_t mi = 0; mi < MAX_HVAC_MODES; mi++) {
+        if (h.modes[mi].used && h.modes[mi].level == pct) {
+          strncpy(h.currentMode, h.modes[mi].name, sizeof(h.currentMode) - 1);
+          h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+          LOGF("[HVAC] A%u ch A%u Ch%u=%u%% -> mode '%s'\n",
+               hvacArea, area, ch0 + 1, pct, h.currentMode);
+          changed = true;
+          break;  // only one mode maps to a given level
+        }
+      }
+    }
+    if (h.fanCtrlType == HVAC_CTRL_LEVEL && fanTarget == area && h.fanChannel0 == ch0) {
+      for (uint8_t fi = 0; fi < MAX_HVAC_FANMODES; fi++) {
+        if (h.fanModes[fi].used && h.fanModes[fi].level == pct) {
+          strncpy(h.currentFanMode, h.fanModes[fi].name, sizeof(h.currentFanMode) - 1);
+          h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+          LOGF("[HVAC] A%u ch A%u Ch%u=%u%% -> fan '%s'\n",
+               hvacArea, area, ch0 + 1, pct, h.currentFanMode);
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      publishSensorsForArea(hvacArea);
+      saveEntities();
+    }
   }
 }
 void EntityManager::setChannelOnOff(uint8_t area, uint8_t channel0, bool on) {
@@ -228,53 +270,69 @@ extern void removeHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
 void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   int a = touchArea(area);
   uint8_t prev = 0xFF;
-
   if (a >= 0) {
     prev = _areas[a].preset0;
     _areas[a].preset0 = preset0;
   }
 
-  // HVAC areas: map preset to mode/fan state, skip preset entity + level requests
-  if (a >= 0 && _areas[a].areaType == AREA_HVAC && _areas[a].hvac) {
-    auto& h = *_areas[a].hvac;
-    // Use MAX_HVAC_MODES (not modeCount) so we never skip entries left sparse by deletions
-    for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
-      if (h.modes[i].used && h.modes[i].preset1 == preset0 + 1) {
-        strncpy(h.currentMode, h.modes[i].name, sizeof(h.currentMode) - 1);
-        h.currentMode[sizeof(h.currentMode) - 1] = '\0';
-        LOGF("[HVAC] A%u preset P%u -> mode '%s'\n", area, preset0 + 1, h.currentMode);
+  // ── Scan all HVAC areas: check if this preset drives their mode or fan speed ─
+  // Supports both same-area (modeArea==0) and cross-area (modeArea==otherArea).
+  bool isHvacSelfArea = false;  // true if 'area' itself is an HVAC area
+  for (int i = 0; i < _arCount; i++) {
+    if (!_areas[i].present || _areas[i].areaType != AREA_HVAC || !_areas[i].hvac) continue;
+    auto& h = *_areas[i].hvac;
+    uint8_t hvacArea   = _areas[i].area;
+    uint8_t modeTarget = h.modeArea ? h.modeArea : hvacArea;
+    uint8_t fanTarget  = h.fanArea  ? h.fanArea  : hvacArea;
+    bool changed = false;
+
+    if (h.modeCtrlType == HVAC_CTRL_PRESET && modeTarget == area) {
+      for (uint8_t mi = 0; mi < MAX_HVAC_MODES; mi++) {
+        if (h.modes[mi].used && h.modes[mi].preset1 == preset0 + 1) {
+          strncpy(h.currentMode, h.modes[mi].name, sizeof(h.currentMode) - 1);
+          h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+          LOGF("[HVAC] A%u preset A%u P%u -> mode '%s'\n",
+               hvacArea, area, preset0 + 1, h.currentMode);
+          changed = true;
+        }
       }
     }
-    for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
-      if (h.fanModes[i].used && h.fanModes[i].preset1 == preset0 + 1) {
-        strncpy(h.currentFanMode, h.fanModes[i].name, sizeof(h.currentFanMode) - 1);
-        h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
-        LOGF("[HVAC] A%u preset P%u -> fan '%s'\n", area, preset0 + 1, h.currentFanMode);
+    if (h.fanCtrlType == HVAC_CTRL_PRESET && fanTarget == area) {
+      for (uint8_t fi = 0; fi < MAX_HVAC_FANMODES; fi++) {
+        if (h.fanModes[fi].used && h.fanModes[fi].preset1 == preset0 + 1) {
+          strncpy(h.currentFanMode, h.fanModes[fi].name, sizeof(h.currentFanMode) - 1);
+          h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+          LOGF("[HVAC] A%u preset A%u P%u -> fan '%s'\n",
+               hvacArea, area, preset0 + 1, h.currentFanMode);
+          changed = true;
+        }
       }
     }
-    LOGF("[HVAC] A%u notePreset P%u: mode='%s' fan='%s' -> publishing\n",
-         area, preset0 + 1, h.currentMode[0] ? h.currentMode : "(none)",
-         h.currentFanMode[0] ? h.currentFanMode : "(none)");
-    publishSensorsForArea(area);  // publishes temp + setpoint + mode + fan state
-    saveEntities();
-    return;
+    // Publish sensors whenever a preset arrives from any configured source area
+    if (modeTarget == area || fanTarget == area) {
+      LOGF("[HVAC] A%u notePreset A%u P%u: mode='%s' fan='%s'\n",
+           hvacArea, area, preset0 + 1,
+           h.currentMode[0] ? h.currentMode : "(none)",
+           h.currentFanMode[0] ? h.currentFanMode : "(none)");
+      publishSensorsForArea(hvacArea);
+      if (changed) saveEntities();
+    }
+    if (hvacArea == area) isHvacSelfArea = true;
   }
+
+  // If 'area' is an HVAC area itself, skip normal preset-entity + level-refresh handling
+  if (isHvacSelfArea) return;
 
   publishPresetForArea(area);
 
-  // Only act when preset actually changes (or was previously unknown)
+  // Only schedule level refresh when preset actually changes
   if (prev == preset0 && prev != 0xFF) return;
-
-  // Debounce so we don't request twice (e.g. when both 0x64 and 0x62 arrive)
   uint32_t now = millis();
   if (a >= 0 && (now - _areas[a].lastLevelReqMs) < 300) return;
   if (a >= 0) _areas[a].lastLevelReqMs = now;
-
-  // Schedule non-blocking level refresh after preset change (400ms settling time)
   dynet.scheduleAreaLevelReqs(area, 400);
   LOGF("[DyNet] A%u preset->P%u (was P%u) => scheduled level refresh\n",
        area, preset0 + 1, (prev == 0xFF ? 0 : prev + 1));
-
   saveEntities();
 }
 
@@ -788,7 +846,7 @@ void EntityManager::commandAreaCurtain(uint8_t area, uint8_t curtainIdx, const c
 
 // ---- HVAC area management ------------------------------------------
 
-int EntityManager::addHvacMode(uint8_t area, const char* name, uint8_t preset1) {
+int EntityManager::addHvacMode(uint8_t area, const char* name, uint8_t preset1, uint8_t level) {
   int ai = findArea(area);
   if (ai < 0 || _areas[ai].areaType != AREA_HVAC) return -1;
   if (!_areas[ai].hvac) return -1;
@@ -796,20 +854,21 @@ int EntityManager::addHvacMode(uint8_t area, const char* name, uint8_t preset1) 
   if (h.modeCount >= MAX_HVAC_MODES) return -1;
   for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
     if (!h.modes[i].used) {
-      h.modes[i].used = true;
+      h.modes[i].used    = true;
       h.modes[i].preset1 = preset1;
+      h.modes[i].level   = level;
       strncpy(h.modes[i].name, name ? name : "", sizeof(h.modes[i].name) - 1);
       h.modes[i].name[sizeof(h.modes[i].name) - 1] = '\0';
       h.modeCount++;
       publishHADiscoveryForArea(area);
-      saveEntities();
+      saveEntitiesNow();
       return i;
     }
   }
   return -1;
 }
 
-int EntityManager::addHvacFanMode(uint8_t area, const char* name, uint8_t preset1) {
+int EntityManager::addHvacFanMode(uint8_t area, const char* name, uint8_t preset1, uint8_t level) {
   int ai = findArea(area);
   if (ai < 0 || _areas[ai].areaType != AREA_HVAC) return -1;
   if (!_areas[ai].hvac) return -1;
@@ -817,13 +876,14 @@ int EntityManager::addHvacFanMode(uint8_t area, const char* name, uint8_t preset
   if (h.fanCount >= MAX_HVAC_FANMODES) return -1;
   for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
     if (!h.fanModes[i].used) {
-      h.fanModes[i].used = true;
+      h.fanModes[i].used    = true;
       h.fanModes[i].preset1 = preset1;
+      h.fanModes[i].level   = level;
       strncpy(h.fanModes[i].name, name ? name : "", sizeof(h.fanModes[i].name) - 1);
       h.fanModes[i].name[sizeof(h.fanModes[i].name) - 1] = '\0';
       h.fanCount++;
       publishHADiscoveryForArea(area);
-      saveEntities();
+      saveEntitiesNow();
       return i;
     }
   }
@@ -856,14 +916,22 @@ void EntityManager::commandHvacMode(uint8_t area, const char* modeName) {
   int ai = findArea(area);
   if (ai < 0 || !_areas[ai].hvac) return;
   auto& h = *_areas[ai].hvac;
+  uint8_t targetArea = h.modeArea ? h.modeArea : area;
   for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
     if (h.modes[i].used && strcmp(h.modes[i].name, modeName) == 0) {
-      dynet.sendAreaPreset(area, h.modes[i].preset1, 0);
+      if (h.modeCtrlType == HVAC_CTRL_LEVEL) {
+        dynet.sendFadeToLevel_1s(targetArea, h.modeChannel0, h.modes[i].level, 0);
+        LOGF("[HVAC] A%u mode '%s' -> A%u Ch%u Level %u%%\n",
+             area, modeName, targetArea, h.modeChannel0 + 1, h.modes[i].level);
+      } else {
+        dynet.sendAreaPreset(targetArea, h.modes[i].preset1, 0);
+        LOGF("[HVAC] A%u mode '%s' -> A%u P%u\n",
+             area, modeName, targetArea, h.modes[i].preset1);
+      }
       strncpy(h.currentMode, modeName, sizeof(h.currentMode) - 1);
       h.currentMode[sizeof(h.currentMode) - 1] = '\0';
       publishSensorsForArea(area);
-      saveEntities();   // persist currentMode so it survives a reboot
-      LOGF("[HVAC] A%u mode '%s' -> Preset %u\n", area, modeName, h.modes[i].preset1);
+      saveEntities();
       return;
     }
   }
@@ -874,17 +942,49 @@ void EntityManager::commandHvacFanMode(uint8_t area, const char* fanName) {
   int ai = findArea(area);
   if (ai < 0 || !_areas[ai].hvac) return;
   auto& h = *_areas[ai].hvac;
+  uint8_t targetArea = h.fanArea ? h.fanArea : area;
   for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
     if (h.fanModes[i].used && strcmp(h.fanModes[i].name, fanName) == 0) {
-      dynet.sendAreaPreset(area, h.fanModes[i].preset1, 0);
+      if (h.fanCtrlType == HVAC_CTRL_LEVEL) {
+        dynet.sendFadeToLevel_1s(targetArea, h.fanChannel0, h.fanModes[i].level, 0);
+        LOGF("[HVAC] A%u fan '%s' -> A%u Ch%u Level %u%%\n",
+             area, fanName, targetArea, h.fanChannel0 + 1, h.fanModes[i].level);
+      } else {
+        dynet.sendAreaPreset(targetArea, h.fanModes[i].preset1, 0);
+        LOGF("[HVAC] A%u fan '%s' -> A%u P%u\n",
+             area, fanName, targetArea, h.fanModes[i].preset1);
+      }
       strncpy(h.currentFanMode, fanName, sizeof(h.currentFanMode) - 1);
       h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
       publishSensorsForArea(area);
-      saveEntities();   // persist currentFanMode so it survives a reboot
-      LOGF("[HVAC] A%u fan '%s' -> Preset %u\n", area, fanName, h.fanModes[i].preset1);
+      saveEntities();
       return;
     }
   }
   LOGF("[HVAC] A%u fan '%s' not found\n", area, fanName);
+}
+
+void EntityManager::setHvacModeCtrl(uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  h.modeCtrlType = ctrlType;
+  h.modeArea     = srcArea;
+  h.modeChannel0 = ch0;
+  publishHADiscoveryForArea(area);
+  saveEntitiesNow();
+  LOGF("[HVAC] A%u mode ctrl: type=%u srcA=%u ch=%u\n", area, ctrlType, srcArea, ch0);
+}
+
+void EntityManager::setHvacFanCtrl(uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  h.fanCtrlType = ctrlType;
+  h.fanArea     = srcArea;
+  h.fanChannel0 = ch0;
+  publishHADiscoveryForArea(area);
+  saveEntitiesNow();
+  LOGF("[HVAC] A%u fan ctrl: type=%u srcA=%u ch=%u\n", area, ctrlType, srcArea, ch0);
 }
 

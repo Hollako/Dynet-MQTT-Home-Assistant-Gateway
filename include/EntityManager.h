@@ -27,11 +27,17 @@ enum AreaType : uint8_t {
   AREA_HVAC    = 2,   // climate/thermostat — modes+fan mapped to presets, temp/setpoint via opcodes
 };
 
-// One HVAC operating mode or fan speed mapped to a Dynalite preset
+// Control type for HVAC mode / fan speed groups
+static constexpr uint8_t HVAC_CTRL_PRESET = 0;  // each entry maps to a Dynalite preset
+static constexpr uint8_t HVAC_CTRL_LEVEL  = 1;  // a single channel; level % selects the mode
+
+// One HVAC operating mode or fan speed entry.
+// Both preset1 and level are always stored — which is used depends on the group's ctrlType.
 struct HvacModeEntry {
   bool    used    = false;
   char    name[24] = {};  // HA mode name e.g. "off", "cool", "heat", "fan_only"
-  uint8_t preset1 = 1;   // 1-based Dynalite preset
+  uint8_t preset1 = 1;   // 1-based Dynalite preset      (used when ctrlType == HVAC_CTRL_PRESET)
+  uint8_t level   = 0;   // 0..100 % channel level       (used when ctrlType == HVAC_CTRL_LEVEL)
 };
 static constexpr uint8_t MAX_HVAC_MODES    = 8;
 static constexpr uint8_t MAX_HVAC_FANMODES = 6;
@@ -43,13 +49,23 @@ struct AreaPresetNames {
 };
 
 struct HvacConfig {
+  // ── Mode group ──────────────────────────────────────────────────────────────
+  uint8_t       modeCtrlType  = HVAC_CTRL_PRESET; // 0=preset, 1=channel level
+  uint8_t       modeArea      = 0;                // 0 = same as the HVAC area
+  uint8_t       modeChannel0  = 0;                // 0-based channel (level mode only)
   HvacModeEntry modes[MAX_HVAC_MODES];
+  uint8_t       modeCount     = 0;
+  char          currentMode[24]    = {};           // last known mode name; "" = unknown
+
+  // ── Fan speed group ─────────────────────────────────────────────────────────
+  uint8_t       fanCtrlType   = HVAC_CTRL_PRESET; // 0=preset, 1=channel level
+  uint8_t       fanArea       = 0;                // 0 = same as the HVAC area
+  uint8_t       fanChannel0   = 0;                // 0-based channel (level mode only)
   HvacModeEntry fanModes[MAX_HVAC_FANMODES];
-  uint8_t       modeCount = 0;
-  uint8_t       fanCount  = 0;
-  char          currentMode[24]    = {};  // last known mode name; "" = unknown
-  char          currentFanMode[24] = {};  // last known fan mode;  "" = unknown
-  float         setptStep = 0.5f;         // temperature setpoint step: 0.5 or 1.0 °C
+  uint8_t       fanCount      = 0;
+  char          currentFanMode[24] = {};           // last known fan mode;  "" = unknown
+
+  float         setptStep = 0.5f;                  // temperature setpoint step: 0.5 or 1.0 °C
 };
 
 struct ChannelState {
@@ -185,12 +201,16 @@ public:
   void commandAreaCurtain(uint8_t area, uint8_t curtainIdx, const char* cmd); // "OPEN"/"CLOSE"/"STOP"
 
   // HVAC area management
-  int  addHvacMode   (uint8_t area, const char* name, uint8_t preset1); // returns idx or -1
-  int  addHvacFanMode(uint8_t area, const char* name, uint8_t preset1);
+  // preset1 and level are BOTH stored; the active one depends on the group's ctrlType.
+  int  addHvacMode   (uint8_t area, const char* name, uint8_t preset1, uint8_t level = 0);
+  int  addHvacFanMode(uint8_t area, const char* name, uint8_t preset1, uint8_t level = 0);
   void deleteHvacMode   (uint8_t area, uint8_t idx);
   void deleteHvacFanMode(uint8_t area, uint8_t idx);
-  void commandHvacMode   (uint8_t area, const char* modeName); // from HA: send preset + publish state
+  void commandHvacMode   (uint8_t area, const char* modeName); // from HA: send command + publish
   void commandHvacFanMode(uint8_t area, const char* fanName);
+  // Set the control type and source area/channel for the mode or fan group
+  void setHvacModeCtrl(uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0);
+  void setHvacFanCtrl (uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0);
 
   // Access
   inline int channelsCount() const { return _chCount; }
@@ -217,6 +237,8 @@ private:
 
   bool growAreaArray();     // allocate more AreaState slots (up to _arCap)
   bool growChannelArray();  // allocate more ChannelState slots (up to _chCap)
+  // Called from setChannelLevel() to update any HVAC area that uses this channel as a level source
+  void checkHvacLevelSources(uint8_t area, uint8_t ch0, uint8_t pct);
 
 // (public:)
 inline int maxChannels() const { return _chCap; }

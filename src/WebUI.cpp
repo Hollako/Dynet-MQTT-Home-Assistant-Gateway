@@ -43,7 +43,17 @@ namespace DynetEntities { extern EntityManager em; }
 extern void publishHADiscoveryForArea(uint8_t area);
 
 // ---------- small helpers for streamed HTML ----------
+// Buffer variables must be declared before pageBegin() uses them
+#if defined(ESP32)
+static char   _pageBuf[2048];
+static size_t _pageBufLen = 0;
+#endif
+
 static inline void pageBegin(const String& title) {
+#if defined(ESP32)
+  _pageBufLen = 0;                      // reset buffer for new page
+  server.client().setNoDelay(true);     // disable Nagle — flush TCP packets immediately
+#endif
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "text/html; charset=utf-8", "");
   server.sendContent(
@@ -182,9 +192,40 @@ static inline void pageBegin(const String& title) {
   server.sendContent(HA_SW_VERSION);
   server.sendContent(F("</div></div>"));
 }
+// ── Buffered page output (ESP32) ─────────────────────────────────────────────
+// On ESP32 every sendContent() crosses FreeRTOS task boundaries. Batching into
+// ~2 KB chunks collapses hundreds of tiny TCP writes down to a handful.
+// ESP8266 keeps the original unbuffered path (its lwIP already coalesces well).
+// _pageBuf / _pageBufLen declared above pageBegin() so it can reference them.
+#if defined(ESP32)
+static void pageFlush() {
+  if (_pageBufLen > 0) {
+    server.sendContent(_pageBuf, _pageBufLen);
+    _pageBufLen = 0;
+  }
+}
+static void _pageAppend(const char* s, size_t len) {
+  while (len > 0) {
+    size_t space = sizeof(_pageBuf) - _pageBufLen;
+    size_t n     = len < space ? len : space;
+    memcpy(_pageBuf + _pageBufLen, s, n);
+    _pageBufLen += n; s += n; len -= n;
+    if (_pageBufLen == sizeof(_pageBuf)) pageFlush();
+  }
+}
+static inline void pageWrite(const __FlashStringHelper* f) {
+  const char* s = reinterpret_cast<const char*>(f);  // ESP32: PROGMEM = flash-mapped, direct access
+  _pageAppend(s, strlen(s));
+}
+static inline void pageWrite(const String& s) { if (s.length()) _pageAppend(s.c_str(), s.length()); }
+static inline void pageEnd() { _pageAppend("</div></body></html>", 20); pageFlush(); }
+
+#else  // ESP8266 — original unbuffered path
+static inline void pageFlush() {}  // no-op
 static inline void pageWrite(const __FlashStringHelper* s){ server.sendContent(s); }
 static inline void pageWrite(const String& s){ if(s.length()) server.sendContent(s); }
 static inline void pageEnd(){ server.sendContent(F("</div></body></html>")); }
+#endif
 
 // Safe helper: convert a fixed-length name buffer to an HTML-attribute-safe String.
 // - Never reads past maxLen bytes (handles non-null-terminated buffers).
@@ -514,50 +555,146 @@ static void renderAreaBody(uint8_t aNum) {
       pageWrite(F("</select>"));
     pageWrite(F("</div>"));
 
-    pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:24px;margin-top:8px;align-items:flex-start'>"));
+    // Helper macro to render the ctrl-type row for mode or fan group
+    // (uses C++ scope so we can reference area, hvac, and helper lambdas inline)
+    {
+      auto renderCtrlRow = [&](const char* groupLabel,
+                               const char* groupKey,
+                               uint8_t ctrlType, uint8_t srcArea, uint8_t ch0) {
+        // Resolve display area: 0 means "same as this HVAC area"
+        uint8_t dispArea = (srcArea == 0) ? as.area : srcArea;
+        pageWrite(F("<div class='row' style='gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px'>"));
+        pageWrite(F("<span style='font-size:12px;font-weight:600;color:var(--muted)'>"));
+        pageWrite(groupLabel);
+        pageWrite(F(" source:</span>"));
+        // Control type select
+        pageWrite(F("<select class='in' id='hv_ct_")); pageWrite(groupKey); pageWrite(F("_")); pageWrite(String(as.area));
+        pageWrite(F("' style='width:130px;padding:3px 5px'>"));
+        pageWrite(F("<option value='0'")); if (ctrlType==0) pageWrite(F(" selected")); pageWrite(F(">Preset</option>"));
+        pageWrite(F("<option value='1'")); if (ctrlType==1) pageWrite(F(" selected")); pageWrite(F(">Channel Level</option>"));
+        pageWrite(F("</select>"));
+        // Source area — shown always; display resolved area number (min 2)
+        pageWrite(F("<span style='font-size:11px;color:var(--muted)'>Area:</span>"));
+        pageWrite(F("<input class='in' id='hv_sa_")); pageWrite(groupKey); pageWrite(F("_")); pageWrite(String(as.area));
+        pageWrite(F("' type='number' min='2' max='255' value='"));
+        pageWrite(String(dispArea));
+        pageWrite(F("' style='width:52px;padding:3px 4px'>"));
+        // Ch: field — visible in Channel Level mode only; hidden (no label) in Preset mode
+        if (ctrlType == 1) {
+          pageWrite(F("<span style='font-size:11px;color:var(--muted)'>Ch:</span>"));
+          pageWrite(F("<input class='in' id='hv_ch_")); pageWrite(groupKey); pageWrite(F("_")); pageWrite(String(as.area));
+          pageWrite(F("' type='number' min='1' max='255' value='"));
+          pageWrite(String((int)ch0 + 1));  // display 1-based
+          pageWrite(F("' style='width:52px;padding:3px 4px'>"));
+        } else {
+          // Keep hidden so saveHvacCtrl() JS can always find it by ID
+          pageWrite(F("<input id='hv_ch_")); pageWrite(groupKey); pageWrite(F("_")); pageWrite(String(as.area));
+          pageWrite(F("' type='hidden' value='")); pageWrite(String((int)ch0 + 1)); pageWrite(F("'>"));
+        }
+        // Save button
+        pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;font-size:12px' onclick='saveHvacCtrl("));
+        pageWrite(String(as.area)); pageWrite(F(",\"")); pageWrite(groupKey); pageWrite(F("\")'>&#10003;</button>"));
+        pageWrite(F("</div>"));
+      };
+
+      renderCtrlRow("Mode",
+                    "mode",
+                    as.hvac->modeCtrlType,
+                    as.hvac->modeArea,
+                    as.hvac->modeChannel0);
+      renderCtrlRow("Fan",
+                    "fan",
+                    as.hvac->fanCtrlType,
+                    as.hvac->fanArea,
+                    as.hvac->fanChannel0);
+    }
+
+    pageWrite(F("<div style='display:flex;flex-wrap:wrap;gap:24px;margin-top:10px;align-items:flex-start'>"));
 
     // Modes column
-    pageWrite(F("<div>"));
-    pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>HVAC Modes (name \xE2\x86\x92 preset)</div>"));
-    for (uint8_t mi = 0; mi < MAX_HVAC_MODES; mi++) {
-      const HvacModeEntry& me = as.hvac->modes[mi];
-      if (!me.used) continue;
-      pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
-        pageWrite(F("<input class='in' id='hvm_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
-        pageWrite(F("' type='text' maxlength='23' placeholder='Mode name' value='"));
-        pageWrite(me.name[0] ? safeAttr(me.name, sizeof(me.name)) : "");
-        pageWrite(F("' style='width:120px;padding:3px 6px'>"));
-        pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
-        pageWrite(F("<input class='in' id='hvm_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
-        pageWrite(F("' type='number' min='1' max='255' value='"));
-        pageWrite(String(me.preset1));
-        pageWrite(F("' style='width:56px;padding:3px 5px'>"));
-        pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacMode("));
-        pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10003;</button>"));
-        pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacMode("));
-        pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10006;</button>"));
+    {
+      uint8_t mCtrl = as.hvac->modeCtrlType;
+      pageWrite(F("<div>"));
+      pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>"));
+      pageWrite(mCtrl == 1 ? F("HVAC Modes (name \xE2\x86\x92 level%)") : F("HVAC Modes (name \xE2\x86\x92 preset)"));
       pageWrite(F("</div>"));
+      for (uint8_t mi = 0; mi < MAX_HVAC_MODES; mi++) {
+        const HvacModeEntry& me = as.hvac->modes[mi];
+        if (!me.used) continue;
+        pageWrite(F("<div class='row' style='gap:5px;align-items:center;margin-bottom:4px'>"));
+          pageWrite(F("<input class='in' id='hvm_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+          pageWrite(F("' type='text' maxlength='23' placeholder='Mode name' value='"));
+          pageWrite(me.name[0] ? safeAttr(me.name, sizeof(me.name)) : "");
+          pageWrite(F("' style='width:110px;padding:3px 6px'>"));
+          // Preset field — visible only in Preset mode (no double-type bug)
+          if (mCtrl == 0) {
+            pageWrite(F("<span style='font-size:11px;color:var(--muted)'>P:</span>"));
+            pageWrite(F("<input class='in' id='hvm_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+            pageWrite(F("' type='number' min='1' max='255' value='"));
+            pageWrite(String(me.preset1));
+            pageWrite(F("' style='width:46px;padding:3px 4px'>"));
+          } else {
+            pageWrite(F("<input id='hvm_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+            pageWrite(F("' type='hidden' value='")); pageWrite(String(me.preset1)); pageWrite(F("'>"));
+          }
+          // Level field — visible only in Channel Level mode (no double-type bug)
+          if (mCtrl == 1) {
+            pageWrite(F("<span style='font-size:11px;color:var(--muted)'>Lv%:</span>"));
+            pageWrite(F("<input class='in' id='hvm_lv_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+            pageWrite(F("' type='number' min='0' max='100' value='"));
+            pageWrite(String(me.level));
+            pageWrite(F("' style='width:46px;padding:3px 4px'>"));
+          } else {
+            pageWrite(F("<input id='hvm_lv_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(mi));
+            pageWrite(F("' type='hidden' value='")); pageWrite(String(me.level)); pageWrite(F("'>"));
+          }
+          pageWrite(F("<button class='btn' style='padding:2px 7px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacMode("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10003;</button>"));
+          pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacMode("));
+          pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(mi)); pageWrite(F(")'>&#10006;</button>"));
+        pageWrite(F("</div>"));
+      }
+      pageWrite(F("</div>")); // modes column
     }
-    pageWrite(F("</div>")); // modes column
 
     // Fan modes column
     if (as.hvac->fanCount > 0) {
+      uint8_t fCtrl = as.hvac->fanCtrlType;
       pageWrite(F("<div>"));
-      pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>Fan Modes (name \xE2\x86\x92 preset)</div>"));
+      pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px'>"));
+      pageWrite(fCtrl == 1 ? F("Fan Speeds (name \xE2\x86\x92 level%)") : F("Fan Speeds (name \xE2\x86\x92 preset)"));
+      pageWrite(F("</div>"));
       for (uint8_t fi = 0; fi < MAX_HVAC_FANMODES; fi++) {
         const HvacModeEntry& fe = as.hvac->fanModes[fi];
         if (!fe.used) continue;
-        pageWrite(F("<div class='row' style='gap:6px;align-items:center;margin-bottom:4px'>"));
+        pageWrite(F("<div class='row' style='gap:5px;align-items:center;margin-bottom:4px'>"));
           pageWrite(F("<input class='in' id='hvf_n_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
-          pageWrite(F("' type='text' maxlength='23' placeholder='Fan mode name' value='"));
+          pageWrite(F("' type='text' maxlength='23' placeholder='Fan speed name' value='"));
           pageWrite(fe.name[0] ? safeAttr(fe.name, sizeof(fe.name)) : "");
-          pageWrite(F("' style='width:120px;padding:3px 6px'>"));
-          pageWrite(F("<span style='font-size:12px;color:var(--muted)'>P:</span>"));
-          pageWrite(F("<input class='in' id='hvf_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
-          pageWrite(F("' type='number' min='1' max='255' value='"));
-          pageWrite(String(fe.preset1));
-          pageWrite(F("' style='width:56px;padding:3px 5px'>"));
-          pageWrite(F("<button class='btn' style='padding:2px 8px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacFan("));
+          pageWrite(F("' style='width:110px;padding:3px 6px'>"));
+          // Preset field — visible only in Preset mode (no double-type bug)
+          if (fCtrl == 0) {
+            pageWrite(F("<span style='font-size:11px;color:var(--muted)'>P:</span>"));
+            pageWrite(F("<input class='in' id='hvf_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+            pageWrite(F("' type='number' min='1' max='255' value='"));
+            pageWrite(String(fe.preset1));
+            pageWrite(F("' style='width:46px;padding:3px 4px'>"));
+          } else {
+            pageWrite(F("<input id='hvf_p_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+            pageWrite(F("' type='hidden' value='")); pageWrite(String(fe.preset1)); pageWrite(F("'>"));
+          }
+          // Level field — visible only in Channel Level mode (no double-type bug)
+          if (fCtrl == 1) {
+            pageWrite(F("<span style='font-size:11px;color:var(--muted)'>Lv%:</span>"));
+            pageWrite(F("<input class='in' id='hvf_lv_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+            pageWrite(F("' type='number' min='0' max='100' value='"));
+            pageWrite(String(fe.level));
+            pageWrite(F("' style='width:46px;padding:3px 4px'>"));
+          } else {
+            pageWrite(F("<input id='hvf_lv_")); pageWrite(String(as.area)); pageWrite(F("_")); pageWrite(String(fi));
+            pageWrite(F("' type='hidden' value='")); pageWrite(String(fe.level)); pageWrite(F("'>"));
+          }
+          pageWrite(F("<button class='btn' style='padding:2px 7px;min-width:auto;min-height:auto;font-size:12px' onclick='saveHvacFan("));
           pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10003;</button>"));
           pageWrite(F("<button class='btn' style='background:#c0392b;color:#fff;padding:2px 6px;min-width:auto;min-height:auto;font-size:12px' onclick='delHvacFan("));
           pageWrite(String(as.area)); pageWrite(F(",")); pageWrite(String(fi)); pageWrite(F(")'>&#10006;</button>"));
@@ -577,9 +714,14 @@ static void handleAreaDetail() {
   if (aNum < 1 || aNum > 255) { server.send(400, "text/plain", "bad area"); return; }
   if (em.findArea((uint8_t)aNum) < 0) { server.send(404, "text/plain", "not found"); return; }
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+#if defined(ESP32)
+  _pageBufLen = 0;
+  server.client().setNoDelay(true);
+#endif
   server.send(200, "text/html; charset=utf-8", "");
   renderAreaBody((uint8_t)aNum);
-  server.sendContent(""); // flush
+  pageFlush();             // flush remaining buffer (ESP32) — no-op on ESP8266
+  server.sendContent(""); // end chunked transfer
 }
 
 // -------------- Home --------------
@@ -849,6 +991,19 @@ void handleRootGet() {
     if (!_a.present) continue;
     pageWrite(String(_a.area) + ":" + (uint8_t)_a.areaType + ",");
   }
+  // ---- HVAC mode/fan ctrl type (0=preset, 1=level) per area ----
+  pageWrite(F("};var hvMCtrl={"));
+  for (int _i = 0; _i < DynetEntities::em.areasCount(); _i++) {
+    const auto& _a = DynetEntities::em.areaAt(_i);
+    if (!_a.present || _a.areaType != DynetEntities::AREA_HVAC || !_a.hvac) continue;
+    pageWrite(String(_a.area) + ":" + (uint8_t)_a.hvac->modeCtrlType + ",");
+  }
+  pageWrite(F("};var hvFCtrl={"));
+  for (int _i = 0; _i < DynetEntities::em.areasCount(); _i++) {
+    const auto& _a = DynetEntities::em.areaAt(_i);
+    if (!_a.present || _a.areaType != DynetEntities::AREA_HVAC || !_a.hvac) continue;
+    pageWrite(String(_a.area) + ":" + (uint8_t)_a.hvac->fanCtrlType + ",");
+  }
   pageWrite(F("};"
     // ---- preset buttons (per-area counts) ----
     "var aPC={"));
@@ -966,28 +1121,53 @@ void handleRootGet() {
     "}"
     "function addHvacMode(area){"
       "const name=prompt('Mode name (e.g. cool, heat, off):'); if(!name)return;"
-      "const preset=parseInt(prompt('Dynalite preset number for this mode:')); if(!preset)return;"
-      "apiPost('/api/hvac/add_mode','area='+area+'&name='+encodeURIComponent(name)+'&preset='+preset);"
+      "var preset=1,lv=0;"
+      "if(hvMCtrl[area]===1){"
+        "const v=prompt('Channel level % for this mode (0-100):');"
+        "if(v===null)return; lv=parseInt(v)||0;"
+      "}else{"
+        "const v=prompt('Dynalite preset number for this mode:');"
+        "if(v===null)return; preset=parseInt(v)||1;"
+      "}"
+      "apiPost('/api/hvac/add_mode','area='+area+'&name='+encodeURIComponent(name)+'&preset='+preset+'&level='+lv);"
     "}"
     "function addHvacFan(area){"
-      "const name=prompt('Fan mode name (e.g. low, medium, high):'); if(!name)return;"
-      "const preset=parseInt(prompt('Dynalite preset number for this fan mode:')); if(!preset)return;"
-      "apiPost('/api/hvac/add_fan','area='+area+'&name='+encodeURIComponent(name)+'&preset='+preset);"
+      "const name=prompt('Fan speed name (e.g. low, medium, high):'); if(!name)return;"
+      "var preset=1,lv=0;"
+      "if(hvFCtrl[area]===1){"
+        "const v=prompt('Channel level % for this fan speed (0-100):');"
+        "if(v===null)return; lv=parseInt(v)||0;"
+      "}else{"
+        "const v=prompt('Dynalite preset number for this fan speed:');"
+        "if(v===null)return; preset=parseInt(v)||1;"
+      "}"
+      "apiPost('/api/hvac/add_fan','area='+area+'&name='+encodeURIComponent(name)+'&preset='+preset+'&level='+lv);"
     "}"
     "function saveHvacMode(area,idx){"
       "const n=document.getElementById('hvm_n_'+area+'_'+idx);"
       "const p=document.getElementById('hvm_p_'+area+'_'+idx);"
-      "if(!n||!p)return;"
+      "const lv=document.getElementById('hvm_lv_'+area+'_'+idx);"
+      "if(!n||!p||!lv)return;"
       "fetch('/api/hvac/save_mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-        "body:'area='+area+'&idx='+idx+'&name='+encodeURIComponent(n.value.trim())+'&preset='+p.value})"
+        "body:'area='+area+'&idx='+idx+'&name='+encodeURIComponent(n.value.trim())+'&preset='+p.value+'&level='+lv.value})"
         ".then(r=>r.json()).then(j=>{if(!j.ok)alert('Failed');}).catch(()=>alert('Error'));"
+    "}"
+    "function saveHvacCtrl(area,group){"
+      "const ct=document.getElementById('hv_ct_'+group+'_'+area);"
+      "const sa=document.getElementById('hv_sa_'+group+'_'+area);"
+      "const ch=document.getElementById('hv_ch_'+group+'_'+area);"
+      "if(!ct||!sa||!ch)return;"
+      "fetch('/api/hvac/set_ctrl',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+        "body:'area='+area+'&group='+group+'&type='+ct.value+'&src_area='+sa.value+'&channel='+ch.value})"
+        ".then(r=>r.json()).then(j=>{if(j.ok)location.reload();else alert('Failed');}).catch(()=>alert('Error'));"
     "}"
     "function saveHvacFan(area,idx){"
       "const n=document.getElementById('hvf_n_'+area+'_'+idx);"
       "const p=document.getElementById('hvf_p_'+area+'_'+idx);"
-      "if(!n||!p)return;"
+      "const lv=document.getElementById('hvf_lv_'+area+'_'+idx);"
+      "if(!n||!p||!lv)return;"
       "fetch('/api/hvac/save_fan',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-        "body:'area='+area+'&idx='+idx+'&name='+encodeURIComponent(n.value.trim())+'&preset='+p.value})"
+        "body:'area='+area+'&idx='+idx+'&name='+encodeURIComponent(n.value.trim())+'&preset='+p.value+'&level='+lv.value})"
         ".then(r=>r.json()).then(j=>{if(!j.ok)alert('Failed');}).catch(()=>alert('Error'));"
     "}"
     "function delHvacMode(area,idx){"
@@ -1078,6 +1258,77 @@ void handleConfigGet() {
   // DyNet limits (declared here, used in both the Dynalite Parameters card and the Actions card)
   uint8_t defCh = cfg.dynet_max_channels ? cfg.dynet_max_channels : (uint8_t)DYNET_MAX_CHANNELS;
   uint8_t defAr = cfg.dynet_max_areas    ? cfg.dynet_max_areas    : (uint8_t)DYNET_MAX_AREAS;
+
+  // ── Network card (ESP32 only — choose WiFi vs Ethernet + PHY config) ────────
+#if defined(ESP32) && defined(ETHERNET_SUPPORTED)
+  pageWrite(F("<div class='card'>"));
+  pageWrite(F("<p class='sec-hdr'>Network</p>"));
+  pageWrite(F("<div class='form-table'>"));
+  // Net Mode selector
+  pageWrite(F("<div>Network Mode</div><div>"
+              "<select class='in' name='net_mode' id='netModeSelect' onchange='toggleEthFields()'>"
+              "<option value='0'"));
+  if (cfg.net_mode == 0) pageWrite(F(" selected"));
+  pageWrite(F(">WiFi</option>"
+              "<option value='1'"));
+  if (cfg.net_mode == 1) pageWrite(F(" selected"));
+  pageWrite(F(">Ethernet (LAN)</option>"
+              "</select></div>"));
+  pageWrite(F("</div>")); // /form-table
+
+  // ETH PHY config — shown/hidden by JS
+  pageWrite(F("<div id='ethFields' style='margin-top:12px'>"));
+  pageWrite(F("<div class='form-table'>"));
+  // PHY Type
+  pageWrite(F("<div>PHY Type</div><div>"
+              "<select class='in' name='eth_phy_type'>"
+              "<option value='0'"));
+  if (cfg.eth_phy_type == 0) pageWrite(F(" selected"));
+  pageWrite(F(">LAN8720</option>"
+              "<option value='1'"));
+  if (cfg.eth_phy_type == 1) pageWrite(F(" selected"));
+  pageWrite(F(">IP101</option>"
+              "<option value='2'"));
+  if (cfg.eth_phy_type == 2) pageWrite(F(" selected"));
+  pageWrite(F(">RTL8201</option>"
+              "<option value='3'"));
+  if (cfg.eth_phy_type == 3) pageWrite(F(" selected"));
+  pageWrite(F(">DP83848</option>"
+              "</select></div>"));
+  // PHY Address
+  pageWrite(F("<div>PHY Address</div><div>"
+              "<input class='in' name='eth_phy_addr' type='number' min='0' max='31' value='"));
+  pageWrite(String(cfg.eth_phy_addr));
+  pageWrite(F("'><div class='muted'>MDIO address — 0 for most LAN8720 boards, 1 for some</div></div>"));
+  // Power Pin
+  pageWrite(F("<div>Power Pin</div><div>"
+              "<select class='in' name='eth_power_pin'>"));
+  pageWrite(gpioOptions((int)cfg.eth_power_pin));
+  pageWrite(F("</select><div class='muted'>PHY power-enable GPIO — None if always powered</div></div>"));
+  // MDC Pin
+  pageWrite(F("<div>MDC GPIO</div><div>"
+              "<select class='in' name='eth_mdc_pin'>"));
+  pageWrite(gpioOptions((int)cfg.eth_mdc_pin));
+  pageWrite(F("</select><div class='muted'>Default 23 for most LAN8720 boards</div></div>"));
+  // MDIO Pin
+  pageWrite(F("<div>MDIO GPIO</div><div>"
+              "<select class='in' name='eth_mdio_pin'>"));
+  pageWrite(gpioOptions((int)cfg.eth_mdio_pin));
+  pageWrite(F("</select><div class='muted'>Default 18 for most LAN8720 boards</div></div>"));
+  pageWrite(F("</div>")); // /form-table
+  pageWrite(F("</div>")); // /ethFields
+
+  // JS toggle for ETH fields visibility
+  pageWrite(F("<script>"
+              "function toggleEthFields(){"
+                "var m=document.getElementById('netModeSelect');"
+                "var d=document.getElementById('ethFields');"
+                "if(m&&d) d.style.display=(m.value=='1'?'':'none');"
+              "}"
+              "toggleEthFields();"  // run once on page load
+              "</script>"));
+  pageWrite(F("</div>")); // /Network card
+#endif  // ESP32 && ETHERNET_SUPPORTED
 
   // Wi-Fi card
   #define W2COL "display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;align-items:start"
@@ -1230,14 +1481,36 @@ void handleConfigGet() {
 
   // Backup / Restore
   pageWrite(F("<div class='card'>"
-                "<div class='row'>"
+                "<div class='section-title' style='margin-bottom:8px'>Backup &amp; Restore</div>"
+                "<div class='row' style='align-items:center;gap:8px'>"
                   "<form method='GET' action='/backup'><button class='btn' type='submit'>Backup</button></form>"
-                  "<form method='POST' action='/restore_backup' enctype='multipart/form-data'>"
+                  "<form method='POST' action='/restore_backup' enctype='multipart/form-data' "
+                       "style='display:flex;align-items:center;gap:12px'>"
                     "<input class='in' type='file' name='upload' accept='.json'/>"
-                    "<button class='btn' type='submit'>Restore</button>"
+                    "<button class='btn' type='submit' style='margin-left:8px'>Restore</button>"
                   "</form>"
                 "</div>"
                 "<div class='muted' style='margin-top:6px'>Backup bundles <b>config</b> and <b>entities</b> (area/channel types).</div>"
+              "</div>"));
+
+  // Reset card — use real form POST so the browser navigates to the rebooting page
+  pageWrite(F("<div class='card'>"
+                "<div class='row' style='gap:8px'>"
+                  "<form method='POST' action='/api/reset_areas' "
+                    "onsubmit=\"return confirm('Delete all Dynalite areas and channels? Other settings are kept. Device will reboot.');\">"
+                    "<button class='btn' style='background:#c0392b;border-color:#922b21' type='submit'>"
+                      "&#x1F5D1; Reset Dynalite Areas</button>"
+                  "</form>"
+                  "<form method='POST' action='/api/factory_reset' "
+                    "onsubmit=\"return confirm('FACTORY RESET: erase ALL settings including Wi-Fi credentials. Device will reboot to AP mode. Are you sure?');\">"
+                    "<button class='btn' style='background:#7b241c;border-color:#4a1010' type='submit'>"
+                      "&#x26A0; Factory Reset</button>"
+                  "</form>"
+                "</div>"
+                "<div class='muted' style='margin-top:6px'>"
+                  "<b>Reset Areas</b> clears area/channel config; keeps Wi-Fi &amp; MQTT. "
+                  "<b>Factory Reset</b> wipes everything and returns to AP mode."
+                "</div>"
               "</div>"));
 
   // Wi‑Fi scan JS
@@ -1938,6 +2211,17 @@ void handleConfigPost() {
   cfg.ha_discovery  = server.hasArg("ha_discovery");
   cfg.log_web       = server.hasArg("log_web");
   if (!cfg.log_web) logs_clear();  // immediately free heap when disabled
+  // Network mode + Ethernet PHY (ESP32 + ETHERNET_SUPPORTED only, safe to parse always)
+  if (server.hasArg("net_mode")) {
+    int v = server.arg("net_mode").toInt();
+    cfg.net_mode = (v == 1) ? NET_ETHERNET : NET_WIFI;
+  }
+  if (server.hasArg("eth_phy_type"))  cfg.eth_phy_type  = (uint8_t)server.arg("eth_phy_type").toInt();
+  if (server.hasArg("eth_phy_addr"))  cfg.eth_phy_addr  = (uint8_t)server.arg("eth_phy_addr").toInt();
+  if (server.hasArg("eth_power_pin")) cfg.eth_power_pin = (int8_t) server.arg("eth_power_pin").toInt();
+  if (server.hasArg("eth_mdc_pin"))   cfg.eth_mdc_pin   = (int8_t) server.arg("eth_mdc_pin").toInt();
+  if (server.hasArg("eth_mdio_pin"))  cfg.eth_mdio_pin  = (int8_t) server.arg("eth_mdio_pin").toInt();
+
   if (server.hasArg("tx_pin"))  { txPin  = sanitizeGpio(server.arg("tx_pin").toInt()); }
   if (server.hasArg("rx_pin"))  { rxPin  = sanitizeGpio(server.arg("rx_pin").toInt()); }
   if (server.hasArg("de_pin"))  { dePin  = sanitizeGpio(server.arg("de_pin").toInt()); }
@@ -2533,7 +2817,7 @@ server.on("/areas_status", HTTP_GET, [](){
     int maxN = (em.areaAt(ai).areaType == AREA_LIGHTS) ? MAX_LIGHT_PRESETS : 128;
     uint8_t n = (uint8_t)constrain(nRaw, 1, maxN);
     em.areaAtMut(ai).presetCount = n;
-    saveEntities();
+    saveEntitiesNow();
     publishHADiscoveryForArea(area);  // republish only this area's preset select
     server.send(200, "application/json", "{\"ok\":true}");
   });
@@ -2644,8 +2928,9 @@ server.on("/areas_status", HTTP_GET, [](){
     if (!server.hasArg("area")||!server.hasArg("name")||!server.hasArg("preset")){server.send(400,"application/json","{\"ok\":false}");return;}
     uint8_t area   = (uint8_t)server.arg("area").toInt();
     uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    uint8_t level  = server.hasArg("level") ? (uint8_t)constrain(server.arg("level").toInt(),0,100) : 0;
     String  name   = server.arg("name");
-    int idx = em.addHvacMode(area, name.c_str(), preset);
+    int idx = em.addHvacMode(area, name.c_str(), preset, level);
     server.send(200,"application/json", idx>=0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"full or wrong type\"}");
   });
 
@@ -2654,8 +2939,9 @@ server.on("/areas_status", HTTP_GET, [](){
     if (!server.hasArg("area")||!server.hasArg("name")||!server.hasArg("preset")){server.send(400,"application/json","{\"ok\":false}");return;}
     uint8_t area   = (uint8_t)server.arg("area").toInt();
     uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    uint8_t level  = server.hasArg("level") ? (uint8_t)constrain(server.arg("level").toInt(),0,100) : 0;
     String  name   = server.arg("name");
-    int idx = em.addHvacFanMode(area, name.c_str(), preset);
+    int idx = em.addHvacFanMode(area, name.c_str(), preset, level);
     server.send(200,"application/json", idx>=0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"full or wrong type\"}");
   });
 
@@ -2683,14 +2969,16 @@ server.on("/areas_status", HTTP_GET, [](){
     uint8_t area   = (uint8_t)server.arg("area").toInt();
     uint8_t idx    = (uint8_t)server.arg("idx").toInt();
     uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    uint8_t level  = server.hasArg("level") ? (uint8_t)constrain(server.arg("level").toInt(),0,100) : 0;
     String  name   = server.arg("name");
     int ai = em.findArea(area);
     if (ai<0||!em.areaAt(ai).hvac||idx>=MAX_HVAC_MODES||!em.areaAt(ai).hvac->modes[idx].used){server.send(404,"application/json","{\"ok\":false}");return;}
     em.areaAtMut(ai).hvac->modes[idx].preset1 = preset;
+    em.areaAtMut(ai).hvac->modes[idx].level   = level;
     strncpy(em.areaAtMut(ai).hvac->modes[idx].name, name.c_str(), sizeof(DynetEntities::HvacModeEntry::name)-1);
     em.areaAtMut(ai).hvac->modes[idx].name[sizeof(DynetEntities::HvacModeEntry::name)-1] = '\0';
     publishHADiscoveryForArea(area);
-    saveEntities();
+    saveEntitiesNow();
     server.send(200,"application/json","{\"ok\":true}");
   });
 
@@ -2700,14 +2988,45 @@ server.on("/areas_status", HTTP_GET, [](){
     uint8_t area   = (uint8_t)server.arg("area").toInt();
     uint8_t idx    = (uint8_t)server.arg("idx").toInt();
     uint8_t preset = (uint8_t)server.arg("preset").toInt();
+    uint8_t level  = server.hasArg("level") ? (uint8_t)constrain(server.arg("level").toInt(),0,100) : 0;
     String  name   = server.arg("name");
     int ai = em.findArea(area);
     if (ai<0||!em.areaAt(ai).hvac||idx>=MAX_HVAC_FANMODES||!em.areaAt(ai).hvac->fanModes[idx].used){server.send(404,"application/json","{\"ok\":false}");return;}
     em.areaAtMut(ai).hvac->fanModes[idx].preset1 = preset;
+    em.areaAtMut(ai).hvac->fanModes[idx].level   = level;
     strncpy(em.areaAtMut(ai).hvac->fanModes[idx].name, name.c_str(), sizeof(DynetEntities::HvacModeEntry::name)-1);
     em.areaAtMut(ai).hvac->fanModes[idx].name[sizeof(DynetEntities::HvacModeEntry::name)-1] = '\0';
     publishHADiscoveryForArea(area);
-    saveEntities();
+    saveEntitiesNow();
+    server.send(200,"application/json","{\"ok\":true}");
+  });
+
+  // HVAC mode/fan control type + source area/channel
+  server.on("/api/hvac/set_ctrl", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")||!server.hasArg("group")||!server.hasArg("type")) {
+      server.send(400,"application/json","{\"ok\":false}"); return;
+    }
+    uint8_t area     = (uint8_t)server.arg("area").toInt();
+    uint8_t ctrlType = (uint8_t)constrain(server.arg("type").toInt(), 0, 1);
+    uint8_t srcAreaRaw = server.hasArg("src_area") ? (uint8_t)server.arg("src_area").toInt() : 0;
+    // Normalize: if srcArea == this HVAC area, store 0 (meaning "same area")
+    uint8_t srcArea = (srcAreaRaw == area) ? 0 : srcAreaRaw;
+    // channel is sent 1-based from the UI; store 0-based (clamp to 0..254)
+    uint8_t ch0 = 0;
+    if (server.hasArg("channel")) {
+      int chv = (int)server.arg("channel").toInt() - 1;
+      ch0 = (uint8_t)(chv < 0 ? 0 : chv);
+    }
+    String group = server.arg("group");
+    if (group == "mode") {
+      em.setHvacModeCtrl(area, ctrlType, srcArea, ch0);
+    } else if (group == "fan") {
+      em.setHvacFanCtrl(area, ctrlType, srcArea, ch0);
+    } else {
+      server.send(400,"application/json","{\"ok\":false,\"error\":\"group must be mode or fan\"}");
+      return;
+    }
     server.send(200,"application/json","{\"ok\":true}");
   });
 
@@ -2721,7 +3040,7 @@ server.on("/areas_status", HTTP_GET, [](){
     int ai = em.findArea(area);
     if (ai < 0 || !em.areaAt(ai).hvac) { server.send(404, "application/json", "{\"ok\":false}"); return; }
     em.areaAtMut(ai).hvac->setptStep = step;
-    saveEntities();
+    saveEntitiesNow();
     publishHADiscoveryForArea(area);   // re-publish climate entity with new temp_step
     server.send(200, "application/json", "{\"ok\":true}");
   });
@@ -2841,7 +3160,7 @@ server.on("/areas_status", HTTP_GET, [](){
     uint8_t ch   = (uint8_t)server.arg("ch").toInt();
     uint8_t ty   = (uint8_t)server.arg("type").toInt();
     DynetEntities::em.setChannelType(area, ch, (DynetEntities::EntityType)ty);
-    saveEntities(); 
+    saveEntitiesNow(); 
     // republish HA discovery for this channel
     int idx = DynetEntities::em.findChannel(area, ch);
     if (idx >= 0) publishHADiscoveryForChannel(idx);
@@ -3109,7 +3428,7 @@ server.on("/areas_status", HTTP_GET, [](){
   server.on("/api/import_done", HTTP_POST, [](){
     using namespace DynetEntities;
     em.setLoading(false);
-    saveEntities();
+    saveEntitiesNow();
     // Publish HA discovery for every area
     for (int i = 0; i < em.areasCount(); i++) {
       publishHADiscoveryForArea(em.areaAt(i).area);
@@ -3117,6 +3436,27 @@ server.on("/areas_status", HTTP_GET, [](){
     }
     server.sendHeader("Cache-Control","no-store");
     server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Reset Dynalite areas only — keeps config.json, clears entities.json, reboots
+  server.on("/api/reset_areas", HTTP_POST, [](){
+    LittleFS.remove(ENTITIES_FILE);
+    sendRebootingPage("Areas Reset",
+                      "Dynalite area/channel config cleared. Device is rebooting&hellip;",
+                      10, 3000);
+    scheduleReboot(800);
+  });
+
+  // Full factory reset — removes all files, clears EEPROM device-id, reboots to AP mode
+  server.on("/api/factory_reset", HTTP_POST, [](){
+    LittleFS.remove(CONFIG_FILE);
+    LittleFS.remove(ENTITIES_FILE);
+    LittleFS.remove(MAP_FILE);
+    DevIdBlob z = {}; EEPROM.put(0, z); EEPROM.commit();
+    sendRebootingPage("Factory Reset",
+                      "All settings erased. Device is rebooting to AP mode&hellip;",
+                      10, 3000);
+    scheduleReboot(800);
   });
 
   server.begin();

@@ -16,8 +16,14 @@ namespace DynetEntities { extern EntityManager em; }
 bool loadConfig() {
   // Safe defaults before parsing — ensures correct behaviour on first boot
   // or when a key is absent from an older config.json.
-  cfg.ha_discovery = true;
-  cfg.log_web      = false;
+  cfg.ha_discovery  = true;
+  cfg.log_web       = false;
+  cfg.net_mode      = NET_WIFI;
+  cfg.eth_phy_type  = 0;           // LAN8720
+  cfg.eth_phy_addr  = 0;
+  cfg.eth_power_pin = -1;          // not used
+  cfg.eth_mdc_pin   = 23;          // LAN8720 typical
+  cfg.eth_mdio_pin  = 18;          // LAN8720 typical
 
   if (!LittleFS.exists(CONFIG_FILE)) return false;
   File f = LittleFS.open(CONFIG_FILE, "r"); if (!f) return false;
@@ -41,6 +47,14 @@ bool loadConfig() {
   if (doc.containsKey("ha_discovery")) cfg.ha_discovery = (bool)doc["ha_discovery"];
   if (doc.containsKey("log_web"))     cfg.log_web      = (bool)doc["log_web"];
   else cfg.log_web = false; // default OFF — enable in Config page when needed
+
+  // Network mode + Ethernet PHY config (ESP32 only; harmless on ESP8266)
+  if (doc.containsKey("net_mode"))       cfg.net_mode      = (uint8_t)(int)doc["net_mode"];
+  if (doc.containsKey("eth_phy_type"))   cfg.eth_phy_type  = (uint8_t)(int)doc["eth_phy_type"];
+  if (doc.containsKey("eth_phy_addr"))   cfg.eth_phy_addr  = (uint8_t)(int)doc["eth_phy_addr"];
+  if (doc.containsKey("eth_power_pin"))  cfg.eth_power_pin = (int8_t) (int)doc["eth_power_pin"];
+  if (doc.containsKey("eth_mdc_pin"))    cfg.eth_mdc_pin   = (int8_t) (int)doc["eth_mdc_pin"];
+  if (doc.containsKey("eth_mdio_pin"))   cfg.eth_mdio_pin  = (int8_t) (int)doc["eth_mdio_pin"];
 
   // RS485 pins & mode (optional; -1 means not used)
   if (doc.containsKey("tx_pin")) txPin = sanitizeGpio((int)doc["tx_pin"]);
@@ -74,6 +88,14 @@ bool saveConfig() {
   doc["mqtt_pass"]    = cfg.mqtt_pass;
   doc["ha_discovery"] = cfg.ha_discovery;
   doc["log_web"]      = cfg.log_web;
+
+  // Network mode + Ethernet PHY
+  doc["net_mode"]      = cfg.net_mode;
+  doc["eth_phy_type"]  = cfg.eth_phy_type;
+  doc["eth_phy_addr"]  = cfg.eth_phy_addr;
+  doc["eth_power_pin"] = cfg.eth_power_pin;
+  doc["eth_mdc_pin"]   = cfg.eth_mdc_pin;
+  doc["eth_mdio_pin"]  = cfg.eth_mdio_pin;
 
   doc["tx_pin"] = txPin;
   doc["rx_pin"] = rxPin;
@@ -241,12 +263,20 @@ bool loadEntities() {
                 strncpy(ar.hvac->currentFanMode, (const char*)hv["curFan"], sizeof(ar.hvac->currentFanMode) - 1);
                 ar.hvac->currentFanMode[sizeof(ar.hvac->currentFanMode) - 1] = '\0';
               }
+              // Mode/Fan control type fields (added later — safe to be absent in old files)
+              if (hv.containsKey("mCtrl")) ar.hvac->modeCtrlType  = (uint8_t)(int)hv["mCtrl"];
+              if (hv.containsKey("mSrcA")) ar.hvac->modeArea      = (uint8_t)(int)hv["mSrcA"];
+              if (hv.containsKey("mCh"))   ar.hvac->modeChannel0  = (uint8_t)(int)hv["mCh"];
+              if (hv.containsKey("fCtrl")) ar.hvac->fanCtrlType   = (uint8_t)(int)hv["fCtrl"];
+              if (hv.containsKey("fSrcA")) ar.hvac->fanArea       = (uint8_t)(int)hv["fSrcA"];
+              if (hv.containsKey("fCh"))   ar.hvac->fanChannel0   = (uint8_t)(int)hv["fCh"];
               if (hv.containsKey("modes") && hv["modes"].is<JsonArray>()) {
                 uint8_t mi = 0;
                 for (JsonObject me : hv["modes"].as<JsonArray>()) {
                   if (mi >= DynetEntities::MAX_HVAC_MODES) break;
                   ar.hvac->modes[mi].used    = true;
-                  ar.hvac->modes[mi].preset1 = me["p"] | 1;
+                  ar.hvac->modes[mi].preset1 = me["p"]  | 1;
+                  ar.hvac->modes[mi].level   = me["lv"] | 0;
                   if (me.containsKey("n") && me["n"].is<const char*>()) {
                     strncpy(ar.hvac->modes[mi].name, (const char*)me["n"], sizeof(ar.hvac->modes[mi].name) - 1);
                     ar.hvac->modes[mi].name[sizeof(ar.hvac->modes[mi].name) - 1] = '\0';
@@ -261,7 +291,8 @@ bool loadEntities() {
                 for (JsonObject fe : hv["fans"].as<JsonArray>()) {
                   if (fi >= DynetEntities::MAX_HVAC_FANMODES) break;
                   ar.hvac->fanModes[fi].used    = true;
-                  ar.hvac->fanModes[fi].preset1 = fe["p"] | 1;
+                  ar.hvac->fanModes[fi].preset1 = fe["p"]  | 1;
+                  ar.hvac->fanModes[fi].level   = fe["lv"] | 0;
                   if (fe.containsKey("n") && fe["n"].is<const char*>()) {
                     strncpy(ar.hvac->fanModes[fi].name, (const char*)fe["n"], sizeof(ar.hvac->fanModes[fi].name) - 1);
                     ar.hvac->fanModes[fi].name[sizeof(ar.hvac->fanModes[fi].name) - 1] = '\0';
@@ -286,57 +317,37 @@ bool loadEntities() {
   return true;
 }
 
-bool saveEntities() {
+// ── Dirty flag shared by saveEntities() / saveEntitiesNow() / serviceEntitiesSave() ──
+static bool          _entDirty   = false;
+static unsigned long _entDirtyAt = 0;
+static const unsigned long SAVE_DEBOUNCE_MS = 8000UL;  // coalesce bursts into one write
+
+// ── Internal: do the actual JSON write (no debounce logic here) ──────────────
+static bool doWriteEntities() {
   using namespace DynetEntities;
 
-  // ── Debounce: coalesce rapid successive calls into one write ───────────
-  // Temp/setpoint/preset events can arrive in bursts. Deferring up to 10 s
-  // keeps heap pressure low and reduces LittleFS wear.
-  static unsigned long pendingAt  = 0;   // millis() of first deferred request
-  static bool          pending    = false;
-  const unsigned long  DEBOUNCE_MS = 10000UL;
-
-  unsigned long now = millis();
-  if (!pending) {
-    pending   = true;
-    pendingAt = now;
-  }
-  if ((int32_t)(now - pendingAt) < (int32_t)DEBOUNCE_MS) {
-    return true;   // deferred — not an error
-  }
-  pending = false;  // this call will actually write
-
   // ── Build JSON doc BEFORE opening the file ─────────────────────────────
-  // CRITICAL: LittleFS.open("w") truncates the file immediately. If we open
-  // first and then fail (OOM, overflow), the existing entities.json is wiped
-  // and all config is lost on next reboot. Build + validate first, write last.
+  // CRITICAL: LittleFS.open("w") truncates immediately. Build + validate
+  // first so a failed malloc never wipes the existing file.
 #if defined(ESP32)
   static const size_t DOC_SIZE = 65536;
 #else
-  // Actual serialised output is ~1.5 KB; ArduinoJson needs ~3-4× for its
-  // internal node pool. 6 KB fits a heavily-fragmented post-WiFi/MQTT heap
-  // much more reliably than 10 KB while still leaving headroom for growth.
+  // ~1.5 KB output; ArduinoJson needs ~3-4× for its node pool. 6 KB fits the
+  // fragmented post-WiFi/MQTT heap much better than 10 KB.
   static const size_t DOC_SIZE = 6144;
 #endif
 
-  // Pre-flight: reject if free heap is too tight to safely malloc the doc
 #if defined(ESP8266)
   if (ESP.getFreeHeap() < (DOC_SIZE + 4096)) {
-    LOGF("[persist] saveEntities: heap low (%u B free) — deferred\n",
+    LOGF("[persist] saveEntities: heap low (%u B free) — will retry\n",
          (unsigned)ESP.getFreeHeap());
-    pending   = true;   // retry next time saveEntities() is called
-    pendingAt = now;
-    return false;
+    return false;   // caller re-schedules
   }
 #endif
 
   DynamicJsonDocument doc(DOC_SIZE);
-
-  // Guard: if malloc failed (heap fragmentation), capacity == 0
   if (doc.capacity() == 0) {
     LOGF("[persist] saveEntities: OOM — doc malloc failed, keeping old file\n");
-    pending   = true;   // retry next call
-    pendingAt = now;
     return false;
   }
 
@@ -397,21 +408,32 @@ bool saveEntities() {
       hv["step"] = a.hvac->setptStep;
       if (a.hvac->currentMode[0])    hv["curMode"] = a.hvac->currentMode;
       if (a.hvac->currentFanMode[0]) hv["curFan"]  = a.hvac->currentFanMode;
+      // Mode control type / source area / channel (omit defaults to keep JSON compact)
+      if (a.hvac->modeCtrlType)  hv["mCtrl"] = a.hvac->modeCtrlType;
+      if (a.hvac->modeArea)      hv["mSrcA"] = a.hvac->modeArea;
+      if (a.hvac->modeCtrlType == DynetEntities::HVAC_CTRL_LEVEL || a.hvac->modeArea)
+                                 hv["mCh"]   = a.hvac->modeChannel0;
+      if (a.hvac->fanCtrlType)   hv["fCtrl"] = a.hvac->fanCtrlType;
+      if (a.hvac->fanArea)       hv["fSrcA"] = a.hvac->fanArea;
+      if (a.hvac->fanCtrlType == DynetEntities::HVAC_CTRL_LEVEL || a.hvac->fanArea)
+                                 hv["fCh"]   = a.hvac->fanChannel0;
       JsonArray mArr = hv.createNestedArray("modes");
       for (uint8_t mi = 0; mi < DynetEntities::MAX_HVAC_MODES; mi++) {
         const auto& me = a.hvac->modes[mi];
         if (!me.used) continue;
         JsonObject mo = mArr.createNestedObject();
-        mo["n"] = me.name;
-        mo["p"] = me.preset1;
+        mo["n"]  = me.name;
+        mo["p"]  = me.preset1;
+        if (me.level > 0) mo["lv"] = me.level;  // omit 0 to stay compact
       }
       JsonArray fArr = hv.createNestedArray("fans");
       for (uint8_t fi = 0; fi < DynetEntities::MAX_HVAC_FANMODES; fi++) {
         const auto& fe = a.hvac->fanModes[fi];
         if (!fe.used) continue;
         JsonObject fo = fArr.createNestedObject();
-        fo["n"] = fe.name;
-        fo["p"] = fe.preset1;
+        fo["n"]  = fe.name;
+        fo["p"]  = fe.preset1;
+        if (fe.level > 0) fo["lv"] = fe.level;
       }
     }
   }
@@ -431,6 +453,35 @@ bool saveEntities() {
   LOGF("[persist] saveEntities: wrote %u bytes, ch=%d areas=%d\n",
        (unsigned)n, em.channelsCount(), em.areasCount());
   return (n > 0);
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+// Mark dirty — actual write is deferred.  Safe to call from any event handler.
+bool saveEntities() {
+  if (!_entDirty) {
+    _entDirty   = true;
+    _entDirtyAt = millis();
+  }
+  return true;
+}
+
+// Write immediately, bypass the debounce window.
+// Use after user-triggered actions: import, restore, explicit area/channel edits.
+bool saveEntitiesNow() {
+  bool ok = doWriteEntities();
+  if (ok) _entDirty = false;   // cancel any pending deferred write
+  else  { _entDirty = true; _entDirtyAt = millis(); }  // reschedule on failure
+  return ok;
+}
+
+// Call every loop().  Fires the deferred write once the debounce window elapses.
+void serviceEntitiesSave() {
+  if (!_entDirty) return;
+  if ((unsigned long)(millis() - _entDirtyAt) < SAVE_DEBOUNCE_MS) return;
+  bool ok = doWriteEntities();
+  if (ok) _entDirty = false;
+  else    _entDirtyAt = millis();  // retry after another full window on failure
 }
 
 // same helper as your Somfy project

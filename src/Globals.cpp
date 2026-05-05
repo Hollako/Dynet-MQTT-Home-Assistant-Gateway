@@ -218,7 +218,7 @@ void ledStatusLoop() {
   static uint8_t       ledStep  = 0;
   static uint8_t       lastMode = 0xFF;
 
-  const bool wifiOk = (WiFi.status() == WL_CONNECTED);
+  const bool wifiOk = (WiFi.status() == WL_CONNECTED) || ethConnected();
   const bool mqttOk = mqtt.connected();
   const bool noMqtt = (cfg.mqtt_server[0] == '\0');
 

@@ -3,7 +3,7 @@
 // -------------------- HA metadata --------------------
 const char* HA_MANUFACTURER = "SmartWay";
 const char* HA_MODEL        = "ESPDynetGateway";
-const char* HA_SW_VERSION   = "2.1";
+const char* HA_SW_VERSION   = "2.3";
 
 // -------------------- EEPROM device_id magic ----------------
 const uint32_t DEV_ID_MAGIC = 0x44594E54; // 'DYNT'

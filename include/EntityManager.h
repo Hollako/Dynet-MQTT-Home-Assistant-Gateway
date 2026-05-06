@@ -25,6 +25,8 @@ enum AreaType : uint8_t {
   AREA_LIGHTS  = 0,   // normal lighting — channels, preset select in HA
   AREA_CURTAIN = 1,   // virtual curtain — sends presets for OPEN/CLOSE/STOP
   AREA_HVAC    = 2,   // climate/thermostat — modes+fan mapped to presets, temp/setpoint via opcodes
+  // NOTE: PIR is NOT an area type — it is an optional overlay on any area type.
+  //       Enable/disable via setPirPresets() / removePir().
 };
 
 // Control type for HVAC mode / fan speed groups
@@ -93,6 +95,13 @@ struct AreaCurtainEntry {
 };
 static constexpr uint8_t MAX_CURTAINS_PER_AREA = 8;
 
+// PIR / motion sensor config (heap-allocated for AREA_PIR areas)
+struct PirConfig {
+  uint8_t occupiedPreset   = 1;   // 1-based Dynalite preset → publishes ON  to HA
+  uint8_t unoccupiedPreset = 4;   // 1-based Dynalite preset → publishes OFF to HA
+  bool    state            = false; // last known occupancy state (runtime, not persisted)
+};
+
 struct AreaState {
   uint8_t  area     = 0;   // 1..255
   bool     present  = false;
@@ -111,6 +120,7 @@ struct AreaState {
   AreaCurtainEntry* curtains  = nullptr; // heap-allocated [MAX_CURTAINS_PER_AREA] or nullptr
   HvacConfig*       hvac      = nullptr; // heap-allocated for HVAC areas, nullptr otherwise
   AreaPresetNames*  presets   = nullptr; // heap-allocated preset names for AREA_LIGHTS, nullptr otherwise
+  PirConfig*        pir       = nullptr; // heap-allocated for PIR areas, nullptr otherwise
 };
 
 // Hard limits — config values are clamped to these at runtime.
@@ -211,6 +221,10 @@ public:
   // Set the control type and source area/channel for the mode or fan group
   void setHvacModeCtrl(uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0);
   void setHvacFanCtrl (uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0);
+
+  // PIR overlay — can be added to any area type (lights, curtain, hvac…)
+  void setPirPresets(uint8_t area, uint8_t occupiedPreset1, uint8_t unoccupiedPreset1);
+  void removePir(uint8_t area);  // disable PIR on this area
 
   // Access
   inline int channelsCount() const { return _chCount; }

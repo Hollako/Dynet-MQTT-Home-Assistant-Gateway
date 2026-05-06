@@ -266,6 +266,7 @@ extern void publishPresetForArea(uint8_t area);
 extern void removeHADiscoveryForArea(uint8_t area);
 extern void publishHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
 extern void removeHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
+extern void publishPirState(uint8_t area, bool occupied);
 
 void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   int a = touchArea(area);
@@ -322,6 +323,20 @@ void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
 
   // If 'area' is an HVAC area itself, skip normal preset-entity + level-refresh handling
   if (isHvacSelfArea) return;
+
+  // PIR overlay: map preset to ON/OFF — coexists with any area type, no early return
+  if (a >= 0 && _areas[a].pir) {
+    PirConfig& p = *_areas[a].pir;
+    if (preset0 + 1 == p.occupiedPreset) {
+      p.state = true;
+      publishPirState(area, true);
+      LOGF("[PIR] A%u P%u → OCCUPIED\n", area, preset0 + 1);
+    } else if (preset0 + 1 == p.unoccupiedPreset) {
+      p.state = false;
+      publishPirState(area, false);
+      LOGF("[PIR] A%u P%u → UNOCCUPIED\n", area, preset0 + 1);
+    }
+  }
 
   publishPresetForArea(area);
 
@@ -617,10 +632,12 @@ bool EntityManager::deleteArea(uint8_t area) {
     // Free this area's heap pointers before overwriting the slot
     if (_areas[ai].curtains) { delete[] _areas[ai].curtains; _areas[ai].curtains = nullptr; }
     if (_areas[ai].hvac)     { delete   _areas[ai].hvac;     _areas[ai].hvac     = nullptr; }
+    if (_areas[ai].pir)      { delete   _areas[ai].pir;      _areas[ai].pir      = nullptr; }
     if (ai != _arCount - 1) {
       _areas[ai] = _areas[_arCount - 1];
       _areas[_arCount - 1].curtains = nullptr; // prevent double-free of moved pointers
       _areas[_arCount - 1].hvac     = nullptr;
+      _areas[_arCount - 1].pir      = nullptr;
     }
     _arCount--;
   }
@@ -736,6 +753,7 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
   if (_areas[ai].areaType == AREA_HVAC && t != AREA_HVAC) {
     if (_areas[ai].hvac) { delete _areas[ai].hvac; _areas[ai].hvac = nullptr; }
   }
+  // PIR is not an area type — it is an independent overlay; no action here
 
   _areas[ai].areaType = t;
 
@@ -774,6 +792,33 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
   // Wipe all stale HA entities for this area then publish the correct new ones
   if (!_loading) {
     removeHADiscoveryForArea(area);
+    publishHADiscoveryForArea(area);
+    saveEntities();
+  }
+}
+
+void EntityManager::setPirPresets(uint8_t area, uint8_t occupiedPreset1, uint8_t unoccupiedPreset1) {
+  int ai = touchArea(area);
+  if (ai < 0) return;
+  // Allocate on first use
+  if (!_areas[ai].pir) _areas[ai].pir = new (std::nothrow) PirConfig{};
+  if (!_areas[ai].pir) return;
+  _areas[ai].pir->occupiedPreset   = occupiedPreset1 ? occupiedPreset1 : 1;
+  _areas[ai].pir->unoccupiedPreset = unoccupiedPreset1 ? unoccupiedPreset1 : 4;
+  if (!_loading) { publishHADiscoveryForArea(area); saveEntities(); }
+}
+
+void EntityManager::removePir(uint8_t area) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].pir) return;
+  delete _areas[ai].pir; _areas[ai].pir = nullptr;
+  // Wipe the binary_sensor discovery from HA and republish the area without it
+  if (!_loading) {
+    String sid = mqttSafeId(deviceId);
+    if (mqtt.connected()) {
+      String t = String(HA_DISCOVERY_PREFIX) + "/binary_sensor/" + sid + "/a" + area + "_motion/config";
+      mqtt.publish(t.c_str(), "", true);
+    }
     publishHADiscoveryForArea(area);
     saveEntities();
   }

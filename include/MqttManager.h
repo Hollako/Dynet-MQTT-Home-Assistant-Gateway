@@ -29,3 +29,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 // Publish current preset for an Area (1-based string or "unknown")
 void publishPresetForArea(uint8_t area);
+
+// Publish PIR / motion sensor state to HA binary_sensor
+void publishPirState(uint8_t area, bool occupied);

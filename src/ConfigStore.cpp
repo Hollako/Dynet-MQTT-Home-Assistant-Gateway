@@ -243,6 +243,16 @@ bool loadEntities() {
               }
             }
 
+            // Allocate PIR config on demand (PIR is an overlay, not tied to area type)
+            if (v.containsKey("pir") && !ar.pir) {
+              ar.pir = new (std::nothrow) DynetEntities::PirConfig{};
+            }
+            if (ar.pir && v.containsKey("pir")) {
+              JsonObject pv = v["pir"].as<JsonObject>();
+              ar.pir->occupiedPreset   = pv["occ"] | 1;
+              ar.pir->unoccupiedPreset = pv["unocc"] | 4;
+            }
+
             // Allocate HVAC config on demand
             if (ar.areaType == DynetEntities::AREA_HVAC && !ar.hvac) {
               ar.hvac = new (std::nothrow) DynetEntities::HvacConfig{};
@@ -378,6 +388,11 @@ static bool doWriteEntities() {
     if (a.hasSetpt) o["setptC"] = a.setptC;
     if (a.name[0])  o["n"]      = a.name;
     o["pc"] = a.presetCount ? a.presetCount : 4;
+    if (a.pir) {  // PIR overlay — saved independently of area type
+      JsonObject pv = o.createNestedObject("pir");
+      pv["occ"]   = a.pir->occupiedPreset;
+      pv["unocc"] = a.pir->unoccupiedPreset;
+    }
     if (a.areaType == DynetEntities::AREA_CURTAIN && a.curtains) {
       o["at"] = (uint8_t)a.areaType;
       JsonArray cArr = o.createNestedArray("curtains");

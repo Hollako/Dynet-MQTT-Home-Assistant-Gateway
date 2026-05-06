@@ -705,6 +705,35 @@ static void renderAreaBody(uint8_t aNum) {
 
     pageWrite(F("</div>")); // flex row
   }
+
+  // ── PIR overlay — shown for ANY area type when PIR is enabled ───────────
+  if (as.pir) {
+    uint8_t occP   = as.pir->occupiedPreset;
+    uint8_t unoccP = as.pir->unoccupiedPreset;
+    pageWrite(F("<div style='border-top:1px solid var(--border);margin-top:10px;padding-top:8px'>"));
+    pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px'>&#128680; PIR / Motion Sensor</div>"));
+    pageWrite(F("<div class='row' style='gap:10px;align-items:center;flex-wrap:wrap'>"));
+      pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Occupied preset:</span>"));
+      pageWrite(F("<input class='in' id='pir_occ_")); pageWrite(String(as.area));
+      pageWrite(F("' type='number' min='1' max='255' value='"));
+      pageWrite(String(occP));
+      pageWrite(F("' style='width:60px;padding:3px 5px' title='Preset received when motion detected'>"));
+      pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Unoccupied preset:</span>"));
+      pageWrite(F("<input class='in' id='pir_unocc_")); pageWrite(String(as.area));
+      pageWrite(F("' type='number' min='1' max='255' value='"));
+      pageWrite(String(unoccP));
+      pageWrite(F("' style='width:60px;padding:3px 5px' title='Preset received when area is clear'>"));
+      pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px'"
+                  " onclick='savePirPresets("));
+      pageWrite(String(as.area));
+      pageWrite(F(")'>&#10003; Save</button>"));
+    pageWrite(F("</div>"));
+    pageWrite(F("<div class='muted' style='margin-top:6px'>"));
+    pageWrite(F("Map the Dynalite presets for motion detected and area clear &mdash; "
+                "gateway publishes ON/OFF to Home Assistant as a motion binary_sensor."));
+    pageWrite(F("</div>"));
+    pageWrite(F("</div>")); // pir border section
+  }
 }
 
 // Serve the body of one area card for lazy AJAX loading
@@ -854,6 +883,14 @@ void handleRootGet() {
         pageWrite((as.preset0 == 0xFF) ? String("?") : String((int)as.preset0 + 1));
         pageWrite(F("</span>"));
         // HVAC live status pills — kept in header so pollAreas() always sees them
+        if (as.pir) {
+          bool occ = as.pir->state;
+          pageWrite(F("<span class='pill' style='background:"));
+          pageWrite(occ ? F("#19c37d22;color:#19c37d") : F("#9ca3af22;color:#9ca3af"));
+          pageWrite(F("'>&#x25CF;&nbsp;"));
+          pageWrite(occ ? F("Occupied") : F("Clear"));
+          pageWrite(F("</span>"));
+        }
         if (as.areaType == DynetEntities::AREA_HVAC) {
           pageWrite(F("<span style='font-size:11px;color:var(--muted)'>Temperature:</span>"));
           pageWrite(F("<span class='pill' id='hvac_temp_A")); pageWrite(String(as.area));
@@ -890,6 +927,17 @@ void handleRootGet() {
           pageWrite(String(as.area)); pageWrite(F(")'>+Mode</button>"));
           pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addHvacFan("));
           pageWrite(String(as.area)); pageWrite(F(")'>+Fan</button>"));
+        }
+        // PIR Sensor toggle (Lights areas only)
+        if (as.areaType == DynetEntities::AREA_LIGHTS) {
+          if (as.pir) {
+            pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px;"
+                        "background:#7b3f00;color:#fff' onclick='removePir("));
+            pageWrite(String(as.area)); pageWrite(F(")'>&#128680; Remove PIR</button>"));
+          } else {
+            pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='addPir("));
+            pageWrite(String(as.area)); pageWrite(F(")'>+ PIR</button>"));
+          }
         }
         // Expand / collapse toggle
         pageWrite(F("<button id='atog_")); pageWrite(String(as.area));
@@ -1118,6 +1166,21 @@ void handleRootGet() {
     "function setAreaType(area,t){"
       "fetch('/api/area_type',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area+'&type='+t})"
         ".then(r=>r.json()).then(j=>{if(j.ok)location.reload();else alert('Failed');}).catch(()=>alert('Error'));"
+    "}"
+    "function savePirPresets(area){"
+      "const occ=document.getElementById('pir_occ_'+area);"
+      "const unocc=document.getElementById('pir_unocc_'+area);"
+      "if(!occ||!unocc)return;"
+      "fetch('/api/set_pir_presets',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+        "body:'area='+area+'&occ='+occ.value+'&unocc='+unocc.value})"
+        ".then(r=>r.json()).then(j=>{if(j.ok)location.reload();else alert('Failed');}).catch(()=>alert('Error'));"
+    "}"
+    "function addPir(area){"
+      "apiPost('/api/set_pir_presets','area='+area+'&occ=1&unocc=4');"
+    "}"
+    "function removePir(area){"
+      "if(!confirm('Remove PIR sensor from Area '+area+'?'))return;"
+      "apiPost('/api/remove_pir','area='+area);"
     "}"
     "function addHvacMode(area){"
       "const name=prompt('Mode name (e.g. cool, heat, off):'); if(!name)return;"
@@ -2416,7 +2479,7 @@ void handleApPortalGet() {
        "<label>SSID</label><input name='wifi_ssid' type='text' required value=''>"
        "<label>Password</label>"
        "<div style='display:flex;gap:6px;align-items:center'>"
-         "<input id='wpPass' name='wifi_pass' type='password' value='' style='flex:1'>"
+         "<input id='wpPass' name='wifi_pass' type='password' value='' style='width:220px;max-width:100%'>"
          "<button type='button' onclick=\"var i=document.getElementById('wpPass');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'Show':'Hide';\" style='padding:8px 12px;border:1px solid #ccc;border-radius:8px;cursor:pointer;background:#fafafa;white-space:nowrap'>Show</button>"
        "</div>"
        "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap'>"
@@ -3437,6 +3500,32 @@ server.on("/areas_status", HTTP_GET, [](){
       yield();
     }
     server.sendHeader("Cache-Control","no-store");
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // PIR overlay — set occupied / unoccupied preset numbers (also enables PIR if not already on)
+  server.on("/api/set_pir_presets", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area") || !server.hasArg("occ") || !server.hasArg("unocc")) {
+      server.send(400, "application/json", "{\"ok\":false}"); return;
+    }
+    uint8_t area  = (uint8_t)server.arg("area").toInt();
+    uint8_t occ   = (uint8_t)constrain(server.arg("occ").toInt(),   1, 255);
+    uint8_t unocc = (uint8_t)constrain(server.arg("unocc").toInt(), 1, 255);
+    em.setPirPresets(area, occ, unocc);
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // PIR overlay — remove PIR sensor from an area
+  server.on("/api/remove_pir", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")) {
+      server.send(400, "application/json", "{\"ok\":false}"); return;
+    }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    em.removePir(area);
+    server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", "{\"ok\":true}");
   });
 

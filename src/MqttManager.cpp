@@ -108,6 +108,42 @@ static String areaDisplayName(uint8_t area) {
   return String("Area ") + String(area);
 }
 
+// ---- PIR / Motion sensor binary_sensor --------------------------------
+static void publishHADiscovery_MotionSensor(uint8_t area) {
+  using namespace DynetEntities;
+  String sid      = mqttSafeId(deviceId);
+  String objId    = String("a") + area + "_motion";
+  String discTopic = String(HA_DISCOVERY_PREFIX) + "/binary_sensor/" + sid + "/" + objId + "/config";
+  String stateTopic = areaBaseTopic(area) + "/motion";
+
+  DynamicJsonDocument doc(512);
+  addHadeviceBlockForArea(doc, area);
+  doc["name"]               = areaDisplayName(area);
+  doc["unique_id"]          = sid + "_" + objId;
+  doc["state_topic"]        = stateTopic;
+  doc["device_class"]       = "motion";
+  doc["payload_on"]         = "ON";
+  doc["payload_off"]        = "OFF";
+  doc["availability_topic"] = availabilityTopic();
+
+  String payload; serializeJson(doc, payload);
+  mqtt.publish(discTopic.c_str(), payload.c_str(), true);
+
+  // Publish current state immediately so HA shows a value right away
+  int ai = em.findArea(area);
+  if (ai >= 0 && em.areaAt(ai).pir) {
+    mqtt.publish(stateTopic.c_str(), em.areaAt(ai).pir->state ? "ON" : "OFF", true);
+  }
+  LOGF("[HA] motion sensor discovery published: A%u\n", area);
+}
+
+void publishPirState(uint8_t area, bool occupied) {
+  if (!mqtt.connected()) return;
+  String t = areaBaseTopic(area) + "/motion";
+  mqtt.publish(t.c_str(), occupied ? "ON" : "OFF", true);
+  LOGF("[MQTT] PIR A%u → %s\n", area, occupied ? "ON" : "OFF");
+}
+
 // Temperature sensor
 static void publishHADiscovery_TempSensor(uint8_t area) {
   String sid = mqttSafeId(deviceId);
@@ -330,19 +366,15 @@ void publishHADiscoveryForArea(uint8_t area) {
         }
       }
     }
-    return;
   }
-
-  // HVAC area: climate entity only (temp/setpoint handled inside climate)
-  if (ai >= 0 && em.areaAt(ai).areaType == AREA_HVAC) {
+  // HVAC area: climate entity + sensors
+  else if (ai >= 0 && em.areaAt(ai).areaType == AREA_HVAC) {
     publishHADiscovery_Climate(area);
     publishSensorsForArea(area);   // push current setpoint/temp/mode state so HA shows values immediately
-    return;
   }
-
   // Default Lights area: save preset button + preset select
   // (temp sensor is published on-demand when first temp opcode arrives)
-  {
+  else {
     String sid = mqttSafeId(deviceId);
     String objId = String("a") + String(area) + "_save_preset";
     String discTopic = String(HA_DISCOVERY_PREFIX) + "/button/" + sid + "/" + objId + "/config";
@@ -355,8 +387,13 @@ void publishHADiscoveryForArea(uint8_t area) {
     addHadeviceBlockForArea(doc, area);
     String payload; serializeJson(doc, payload);
     mqtt.publish(discTopic.c_str(), payload.c_str(), true);
+    publishHADiscovery_PresetSelect(area);
   }
-  publishHADiscovery_PresetSelect(area);
+
+  // PIR overlay: publish binary_sensor for any area that has PIR enabled
+  if (ai >= 0 && em.areaAt(ai).pir) {
+    publishHADiscovery_MotionSensor(area);
+  }
 }
 
 // ---- HA Cover (curtain) discovery -----------------------------------
@@ -429,6 +466,8 @@ void removeHADiscoveryForArea(uint8_t area) {
   mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/a" + area + "_cover/config").c_str(), "", true);
   // climate entity (HVAC)
   mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/climate/" + sid + "/a" + area + "_climate/config").c_str(), "", true);
+  // binary_sensor (PIR / motion sensor)
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/binary_sensor/" + sid + "/a" + area + "_motion/config").c_str(), "", true);
   LOGF("[HA] removed discovery for Area %u\n", area);
 }
 

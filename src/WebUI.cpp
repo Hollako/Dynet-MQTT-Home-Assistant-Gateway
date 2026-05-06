@@ -388,6 +388,21 @@ static void renderAreaBody(uint8_t aNum) {
     pageWrite(F("</div>")); // flex-wrap curtains row
 
   } else if (as.areaType == AREA_LIGHTS) {
+    // ── Fade time row ─────────────────────────────────────────────────────────
+    pageWrite(F("<div class='row' style='margin-top:5px;gap:8px;align-items:center;flex-wrap:wrap'>"));
+      pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Fade:</span>"));
+      pageWrite(F("<input class='in' id='fade_"));
+      pageWrite(String(as.area));
+      pageWrite(F("' type='number' min='0' max='60' step='0.1' value='"));
+      // Convert tenths → seconds with one decimal place
+      char fadeBuf[8]; snprintf(fadeBuf, sizeof(fadeBuf), "%.1f", as.fadeTenths * 0.1f);
+      pageWrite(fadeBuf);
+      pageWrite(F("' style='width:70px;padding:3px 5px' title='Preset fade time in seconds'>"));
+      pageWrite(F("<span style='font-size:12px;color:var(--muted)'>s</span>"));
+      pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px' onclick='saveAreaFade("));
+      pageWrite(String(as.area));
+      pageWrite(F(")'>&#10003; Save</button>"));
+    pageWrite(F("</div>"));
     // ── Area action row: preset buttons + count selector + utility buttons ──
     pageWrite(F("<div class='row' style='margin-top:5px;flex-wrap:wrap;gap:5px;align-items:center'>"));
 
@@ -706,33 +721,11 @@ static void renderAreaBody(uint8_t aNum) {
     pageWrite(F("</div>")); // flex row
   }
 
-  // ── PIR overlay — shown for ANY area type when PIR is enabled ───────────
+  // ── PIR overlay — shown for any area type when PIR is enabled ───────────
   if (as.pir) {
-    uint8_t occP   = as.pir->occupiedPreset;
-    uint8_t unoccP = as.pir->unoccupiedPreset;
     pageWrite(F("<div style='border-top:1px solid var(--border);margin-top:10px;padding-top:8px'>"));
-    pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px'>&#128680; PIR / Motion Sensor</div>"));
-    pageWrite(F("<div class='row' style='gap:10px;align-items:center;flex-wrap:wrap'>"));
-      pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Occupied preset:</span>"));
-      pageWrite(F("<input class='in' id='pir_occ_")); pageWrite(String(as.area));
-      pageWrite(F("' type='number' min='1' max='255' value='"));
-      pageWrite(String(occP));
-      pageWrite(F("' style='width:60px;padding:3px 5px' title='Preset received when motion detected'>"));
-      pageWrite(F("<span style='font-size:12px;color:var(--muted)'>Unoccupied preset:</span>"));
-      pageWrite(F("<input class='in' id='pir_unocc_")); pageWrite(String(as.area));
-      pageWrite(F("' type='number' min='1' max='255' value='"));
-      pageWrite(String(unoccP));
-      pageWrite(F("' style='width:60px;padding:3px 5px' title='Preset received when area is clear'>"));
-      pageWrite(F("<button class='btn' style='padding:3px 10px;min-width:auto;min-height:auto;font-size:13px'"
-                  " onclick='savePirPresets("));
-      pageWrite(String(as.area));
-      pageWrite(F(")'>&#10003; Save</button>"));
+    pageWrite(F("<div style='font-size:12px;font-weight:600;color:var(--muted)'>&#128680; PIR / Motion Sensor Available in this Area</div>"));
     pageWrite(F("</div>"));
-    pageWrite(F("<div class='muted' style='margin-top:6px'>"));
-    pageWrite(F("Map the Dynalite presets for motion detected and area clear &mdash; "
-                "gateway publishes ON/OFF to Home Assistant as a motion binary_sensor."));
-    pageWrite(F("</div>"));
-    pageWrite(F("</div>")); // pir border section
   }
 }
 
@@ -1052,6 +1045,13 @@ void handleRootGet() {
     if (!_a.present || _a.areaType != DynetEntities::AREA_HVAC || !_a.hvac) continue;
     pageWrite(String(_a.area) + ":" + (uint8_t)_a.hvac->fanCtrlType + ",");
   }
+  // ---- per-area fade time (ms) for LIGHTS areas ----
+  pageWrite(F("};var aFade={"));
+  for (int _i = 0; _i < DynetEntities::em.areasCount(); _i++) {
+    const auto& _a = DynetEntities::em.areaAt(_i);
+    if (!_a.present || _a.areaType != DynetEntities::AREA_LIGHTS) continue;
+    pageWrite(String(_a.area) + ":" + (uint32_t)_a.fadeTenths * 100 + ",");  // tenths → ms
+  }
   pageWrite(F("};"
     // ---- preset buttons (per-area counts) ----
     "var aPC={"));
@@ -1100,7 +1100,8 @@ void handleRootGet() {
       ".then(r=>r.json()).then(j=>{if(!j.ok)alert(j.error||'Failed');}).catch(()=>{});"
     "}"
     "function sendPreset(a,p){"
-      "fetch('/api/area_preset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+a+'&preset='+p+'&fade=0'});"
+      "const f=aFade[a]||0;"
+      "fetch('/api/area_preset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+a+'&preset='+p+'&fade='+f});"
     "}"
     "window.addEventListener('DOMContentLoaded',()=>{"
       "setInterval(pollAreas,1500);"
@@ -1167,16 +1168,16 @@ void handleRootGet() {
       "fetch('/api/area_type',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'area='+area+'&type='+t})"
         ".then(r=>r.json()).then(j=>{if(j.ok)location.reload();else alert('Failed');}).catch(()=>alert('Error'));"
     "}"
-    "function savePirPresets(area){"
-      "const occ=document.getElementById('pir_occ_'+area);"
-      "const unocc=document.getElementById('pir_unocc_'+area);"
-      "if(!occ||!unocc)return;"
-      "fetch('/api/set_pir_presets',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-        "body:'area='+area+'&occ='+occ.value+'&unocc='+unocc.value})"
-        ".then(r=>r.json()).then(j=>{if(j.ok)location.reload();else alert('Failed');}).catch(()=>alert('Error'));"
+    "function saveAreaFade(area){"
+      "const el=document.getElementById('fade_'+area);"
+      "if(!el)return;"
+      "const v=parseFloat(el.value);"
+      "if(isNaN(v)||v<0||v>60){alert('Fade must be 0 – 60 seconds');return;}"
+      "const t=Math.round(v*10);"  // tenths of a second
+      "apiPost('/api/set_area_fade','area='+area+'&tenths='+t);"
     "}"
     "function addPir(area){"
-      "apiPost('/api/set_pir_presets','area='+area+'&occ=1&unocc=4');"
+      "apiPost('/api/enable_pir','area='+area);"
     "}"
     "function removePir(area){"
       "if(!confirm('Remove PIR sensor from Area '+area+'?'))return;"
@@ -2827,8 +2828,9 @@ void registerWebRoutes() {
     // Debug prints help a ton
     LOGF("[DyNet] /api/area_preset area=%u preset=%u fade=%u\n", area, preset, fade);
 
-    // Fire it (your send fn already accepts 1‑based preset)
-    dynet.sendAreaPreset(area, preset, fade);
+    // Fire it — use linear opcode (0x65) which supports 16-bit fade (20 ms units)
+    uint16_t fade20 = (uint16_t)(fade / 20);  // ms → 20 ms units
+    dynet.sendSelectPreset_linear(area, preset - 1, fade20);  // preset is 1-based here; linear uses 0-based
     // Schedule level refresh after the preset fade completes
     dynet.scheduleAreaLevelReqs(area, (uint32_t)fade + 500);
 
@@ -3503,16 +3505,25 @@ server.on("/areas_status", HTTP_GET, [](){
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
-  // PIR overlay — set occupied / unoccupied preset numbers (also enables PIR if not already on)
-  server.on("/api/set_pir_presets", HTTP_POST, [](){
+  // LIGHTS area fade time (0.1 s steps; 0 = instant)
+  server.on("/api/set_area_fade", HTTP_POST, [](){
     using namespace DynetEntities;
-    if (!server.hasArg("area") || !server.hasArg("occ") || !server.hasArg("unocc")) {
+    if (!server.hasArg("area") || !server.hasArg("tenths")) {
       server.send(400, "application/json", "{\"ok\":false}"); return;
     }
-    uint8_t area  = (uint8_t)server.arg("area").toInt();
-    uint8_t occ   = (uint8_t)constrain(server.arg("occ").toInt(),   1, 255);
-    uint8_t unocc = (uint8_t)constrain(server.arg("unocc").toInt(), 1, 255);
-    em.setPirPresets(area, occ, unocc);
+    uint8_t  area   = (uint8_t)server.arg("area").toInt();
+    uint16_t tenths = (uint16_t)constrain(server.arg("tenths").toInt(), 0, 600); // max 60 s
+    em.setAreaFade(area, tenths);
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // PIR overlay — enable PIR for an area (allocates PirConfig, publishes HA discovery)
+  server.on("/api/enable_pir", HTTP_POST, [](){
+    using namespace DynetEntities;
+    if (!server.hasArg("area")) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+    uint8_t area = (uint8_t)server.arg("area").toInt();
+    em.enablePir(area);
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", "{\"ok\":true}");
   });

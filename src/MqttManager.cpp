@@ -110,15 +110,16 @@ static String areaDisplayName(uint8_t area) {
 
 // ---- PIR / Motion sensor binary_sensor --------------------------------
 static void publishHADiscovery_MotionSensor(uint8_t area) {
+  if (!mqtt.connected()) return;
   using namespace DynetEntities;
   String sid      = mqttSafeId(deviceId);
   String objId    = String("a") + area + "_motion";
   String discTopic = String(HA_DISCOVERY_PREFIX) + "/binary_sensor/" + sid + "/" + objId + "/config";
   String stateTopic = areaBaseTopic(area) + "/motion";
 
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(768);  // bump from 512 — device block can push it close
   addHadeviceBlockForArea(doc, area);
-  doc["name"]               = areaDisplayName(area);
+  doc["name"]               = "Motion";
   doc["unique_id"]          = sid + "_" + objId;
   doc["state_topic"]        = stateTopic;
   doc["device_class"]       = "motion";
@@ -144,13 +145,58 @@ void publishPirState(uint8_t area, bool occupied) {
   LOGF("[MQTT] PIR A%u → %s\n", area, occupied ? "ON" : "OFF");
 }
 
+// ---- Occupancy-enable switch ----------------------------------------
+static void publishHADiscovery_OccSwitch(uint8_t area) {
+  if (!mqtt.connected()) return;
+  using namespace DynetEntities;
+  String sid       = mqttSafeId(deviceId);
+  String objId     = String("a") + area + "_occ";
+  String discTopic = String(HA_DISCOVERY_PREFIX) + "/switch/" + sid + "/" + objId + "/config";
+  String base      = areaBaseTopic(area) + "/occ";
+
+  DynamicJsonDocument doc(768);  // 768 — device block + switch fields can exceed 512
+  addHadeviceBlockForArea(doc, area);
+  doc["name"]               = "En/Dis Occupancy";
+  doc["unique_id"]          = sid + "_" + objId;
+  doc["state_topic"]        = base + "/state";
+  doc["command_topic"]      = base + "/set";
+  doc["icon"]               = "mdi:motion-sensor";
+  doc["availability_topic"] = availabilityTopic();
+
+  String payload; serializeJson(doc, payload);
+  bool ok = mqtt.publish(discTopic.c_str(), payload.c_str(), true);
+  LOGF("[HA] occ switch discovery A%u payload=%u bytes publish=%s\n",
+       area, (unsigned)payload.length(), ok ? "ok" : "FAIL");
+
+  // Publish current state immediately
+  int ai = em.findArea(area);
+  if (ai >= 0 && em.areaAt(ai).pir) {
+    bool en = em.areaAt(ai).pir->occEnabled;
+    mqtt.publish((base + "/state").c_str(), en ? "ON" : "OFF", true);
+  }
+}
+
+void publishOccSwitchState(uint8_t area, bool enabled) {
+  if (!mqtt.connected()) return;
+  String t = areaBaseTopic(area) + "/occ/state";
+  mqtt.publish(t.c_str(), enabled ? "ON" : "OFF", true);
+  LOGF("[MQTT] OccSwitch A%u → %s\n", area, enabled ? "ON" : "OFF");
+}
+
+void removeHAPirEntities(uint8_t area) {
+  if (!mqtt.connected()) return;
+  String sid = mqttSafeId(deviceId);
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/binary_sensor/" + sid + "/a" + area + "_motion/config").c_str(), "", true);
+  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/switch/"        + sid + "/a" + area + "_occ/config"   ).c_str(), "", true);
+}
+
 // Temperature sensor
 static void publishHADiscovery_TempSensor(uint8_t area) {
   String sid = mqttSafeId(deviceId);
   String objId = String("a") + String(area) + "_temp";
   String discTopic = String(HA_DISCOVERY_PREFIX) + "/sensor/" + sid + "/" + objId + "/config";
   DynamicJsonDocument doc(512);
-  doc["name"]               = areaDisplayName(area) + " Temperature";
+  doc["name"]               = "Temperature";
   doc["unique_id"]          = sid + "_" + objId;
   doc["state_topic"]        = areaBaseTopic(area) + "/temperature";
   doc["unit_of_measurement"] = "°C";
@@ -219,7 +265,7 @@ static void publishHADiscovery_PresetSelect(uint8_t area) {
   String discTopic = String(HA_DISCOVERY_PREFIX) + "/select/" + sid + "/" + objId + "/config";
 
   DynamicJsonDocument doc(1536);  // 128 options × ~5 bytes + doc overhead
-  doc["name"]               = areaDisplayName(area) + " Preset";
+  doc["name"]               = "Preset";
   doc["unique_id"]          = sid + "_" + objId;
   doc["command_topic"]      = areaBaseTopic(area) + "/preset/set";
   doc["state_topic"]        = areaBaseTopic(area) + "/preset";
@@ -379,7 +425,7 @@ void publishHADiscoveryForArea(uint8_t area) {
     String objId = String("a") + String(area) + "_save_preset";
     String discTopic = String(HA_DISCOVERY_PREFIX) + "/button/" + sid + "/" + objId + "/config";
     DynamicJsonDocument doc(512);
-    doc["name"]               = areaDisplayName(area) + " Save Preset";
+    doc["name"]               = "Save Preset";
     doc["unique_id"]          = sid + "_" + objId;
     doc["command_topic"]      = areaBaseTopic(area) + "/save_preset";
     doc["payload_press"]      = "PRESS";
@@ -390,9 +436,10 @@ void publishHADiscoveryForArea(uint8_t area) {
     publishHADiscovery_PresetSelect(area);
   }
 
-  // PIR overlay: publish binary_sensor for any area that has PIR enabled
+  // PIR overlay: publish binary_sensor + occupancy switch for any area that has PIR enabled
   if (ai >= 0 && em.areaAt(ai).pir) {
     publishHADiscovery_MotionSensor(area);
+    publishHADiscovery_OccSwitch(area);
   }
 }
 
@@ -466,8 +513,8 @@ void removeHADiscoveryForArea(uint8_t area) {
   mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/cover/" + sid + "/a" + area + "_cover/config").c_str(), "", true);
   // climate entity (HVAC)
   mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/climate/" + sid + "/a" + area + "_climate/config").c_str(), "", true);
-  // binary_sensor (PIR / motion sensor)
-  mqtt.publish((String(HA_DISCOVERY_PREFIX) + "/binary_sensor/" + sid + "/a" + area + "_motion/config").c_str(), "", true);
+  // PIR entities: binary_sensor (motion) + switch (occupancy enable)
+  removeHAPirEntities(area);
   LOGF("[HA] removed discovery for Area %u\n", area);
 }
 
@@ -780,9 +827,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       }
     }
     if (preset >= 1 && preset <= 128) {
-      dynet.sendAreaPreset((uint8_t)area, (uint8_t)preset, 0);
+      // Use per-area fade (LIGHTS only); convert tenths-of-a-second → 20 ms units
+      using namespace DynetEntities;
+      uint16_t fade20 = 0;
+      int ai_fade = em.findArea((uint8_t)area);
+      if (ai_fade >= 0 && em.areaAt(ai_fade).areaType == AREA_LIGHTS)
+        fade20 = (uint16_t)em.areaAt(ai_fade).fadeTenths * 5;  // 0.1 s × 5 = ×20 ms
+      dynet.sendSelectPreset_linear((uint8_t)area, (uint8_t)(preset - 1), fade20);
       dynet.sendRequestPreset((uint8_t)area);            // immediate — single write, no blocking
-      dynet.scheduleAreaLevelReqs((uint8_t)area, 500);  // non-blocking level refresh
+      dynet.scheduleAreaLevelReqs((uint8_t)area, (uint32_t)fade20 * 20 + 500);  // non-blocking level refresh
       // Optimistic UI update
       using namespace DynetEntities;
       em.noteReportPreset((uint8_t)area, (uint8_t)(preset - 1));
@@ -814,6 +867,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       using namespace DynetEntities;
       em.commandAreaCurtain((uint8_t)area, curtainIdx, msg.c_str());
     }
+    return;
+  }
+
+  // Occupancy enable/disable switch: area/<N>/occ/set  →  ON / OFF
+  if (afterArea == "occ/set") {
+    using namespace DynetEntities;
+    em.setOccupancyEnabled((uint8_t)area, msg == "ON");
     return;
   }
 
@@ -1010,6 +1070,7 @@ static void subscribeAll() {
   mqtt.subscribe((base + "area/+/hvac/fan/set").c_str());
   mqtt.subscribe((base + "area/+/curtain/+/cover/set").c_str());
   mqtt.subscribe((base + "area/+/ch/+/cover/set").c_str());
+  mqtt.subscribe((base + "area/+/occ/set").c_str());
   mqtt.subscribe((base + "gateway/+").c_str());
 }
 

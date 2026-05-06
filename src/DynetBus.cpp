@@ -329,6 +329,27 @@ void DynetBus::sendProgramCurrentPreset(uint8_t area) {
   write8(f);
 }
 
+// Occupancy / PIR TX commands
+// Resume (b5=1): PIR system is active / motion detected; Suspend (b5=0): vacant / standby
+void DynetBus::sendOccupancyResume(uint8_t area, uint8_t ch0) {
+  uint8_t f[8] = { 0x1C, area, ch0, 0x31, 0x00, 0x01, 0xFF, 0x00 };
+  f[7] = checksum(f); write8(f);
+}
+void DynetBus::sendOccupancySuspend(uint8_t area, uint8_t ch0) {
+  uint8_t f[8] = { 0x1C, area, ch0, 0x31, 0x00, 0x00, 0xFF, 0x00 };
+  f[7] = checksum(f); write8(f);
+}
+// Enable occupancy detection for the current preset
+void DynetBus::sendOccupancyEnable(uint8_t area, uint8_t ch0) {
+  uint8_t f[8] = { 0x1C, area, ch0, 0x3B, 0x00, 0x00, 0xFF, 0x00 };
+  f[7] = checksum(f); write8(f);
+}
+// Disable occupancy detection for the current preset
+void DynetBus::sendOccupancyDisable(uint8_t area, uint8_t ch0) {
+  uint8_t f[8] = { 0x1C, area, ch0, 0x3A, 0x00, 0x00, 0xFF, 0x00 };
+  f[7] = checksum(f); write8(f);
+}
+
 // Send HVAC setpoint in q0.25°C (e.g., 22.5°C => 90)
 void DynetBus::sendSetTempSetpoint_q025(uint8_t area, float tempC) {
   int16_t q = (int16_t)roundf(tempC * 4.0f);

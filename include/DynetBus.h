@@ -3,16 +3,18 @@
 #include "Globals.h"
 #include "EntityManager.h"  // for DynetEntities::em.handleLogicalFrame()
 
-// ---------- DyNet opcodes (PLACEHOLDERS – replace with spec values) ----------
+// ---------- DyNet opcodes ----------
 enum : uint8_t {
-  OP_REPORT_LOGICAL   = 0x1C, // logical frame header (if used in your spec)
-  OP_CMD_FADE_LEVEL   = 0x31, // write channel level with fade (example)
-  OP_REQ_CH_LEVEL     = 0x61, // request channel level (example)
-  OP_REQ_ALL_CH       = 0x63, // request all channel levels for area (example)
-  OP_REPORT_LEVEL     = 0x60, // report channel level (example)
-  OP_REQ_PRESET       = 0x62, // request active preset for area (example)
-  OP_SAVE_PRESET      = 0x50, // program/store current preset (example)
-  OP_SET_SETPOINT_Q25 = 0x4B, // set HVAC setpoint in q0.25°C units (example)
+  OP_REPORT_LOGICAL   = 0x1C, // logical frame header byte 0
+  OP_OCCUPANCY_CTRL   = 0x31, // Suspend(b5=0) / Resume(b5=1) occupancy detection — all presets
+  OP_OCCUPANCY_OFF    = 0x3A, // Disable occupancy detection — current preset only
+  OP_OCCUPANCY_ON     = 0x3B, // Enable occupancy detection — current preset only
+  OP_REQ_CH_LEVEL     = 0x61, // request channel level
+  OP_REQ_ALL_CH       = 0x63, // request all channel levels for area
+  OP_REPORT_LEVEL     = 0x60, // report channel level
+  OP_REQ_PRESET       = 0x62, // request active preset for area
+  OP_SAVE_PRESET      = 0x50, // program/store current preset
+  OP_SET_SETPOINT_Q25 = 0x4B, // set HVAC setpoint in q0.25°C units
 };
 
 // ---------- 8-byte physical frame ----------
@@ -37,7 +39,13 @@ public:
   void sendAreaPreset(uint8_t area, uint8_t preset);                       // instant
   void sendAreaPreset(uint8_t area, uint8_t preset, uint16_t fadeMs);      // with fade
   void sendFadeToPreset_linear(uint8_t area, uint8_t preset0, uint8_t fade20ms);
-  void sendSelectPreset_linear(uint8_t area, uint8_t preset0, uint16_t fade20ms16); // 2.0s   
+  void sendSelectPreset_linear(uint8_t area, uint8_t preset0, uint16_t fade20ms16); // 2.0s
+
+  // Occupancy / PIR control (ch0 = 0xFF targets all channels in the area)
+  void sendOccupancyResume (uint8_t area, uint8_t ch0 = 0xFF); // 0x31 b5=1 — Resume (motion active)
+  void sendOccupancySuspend(uint8_t area, uint8_t ch0 = 0xFF); // 0x31 b5=0 — Suspend (vacant)
+  void sendOccupancyEnable (uint8_t area, uint8_t ch0 = 0xFF); // 0x3B — Enable  for current preset
+  void sendOccupancyDisable(uint8_t area, uint8_t ch0 = 0xFF); // 0x3A — Disable for current preset
 
   // Non-blocking deferred level-request queue — processed one-per-call in pollAreas()
   void scheduleLevelReq(uint8_t area, uint8_t ch0, uint32_t afterMs);

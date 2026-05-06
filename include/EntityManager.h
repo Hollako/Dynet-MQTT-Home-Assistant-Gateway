@@ -26,7 +26,7 @@ enum AreaType : uint8_t {
   AREA_CURTAIN = 1,   // virtual curtain — sends presets for OPEN/CLOSE/STOP
   AREA_HVAC    = 2,   // climate/thermostat — modes+fan mapped to presets, temp/setpoint via opcodes
   // NOTE: PIR is NOT an area type — it is an optional overlay on any area type.
-  //       Enable/disable via setPirPresets() / removePir().
+  //       Enable/disable via enablePir() / removePir().
 };
 
 // Control type for HVAC mode / fan speed groups
@@ -95,11 +95,10 @@ struct AreaCurtainEntry {
 };
 static constexpr uint8_t MAX_CURTAINS_PER_AREA = 8;
 
-// PIR / motion sensor config (heap-allocated for AREA_PIR areas)
+// PIR / motion sensor config (heap-allocated on demand, independent of area type)
 struct PirConfig {
-  uint8_t occupiedPreset   = 1;   // 1-based Dynalite preset → publishes ON  to HA
-  uint8_t unoccupiedPreset = 4;   // 1-based Dynalite preset → publishes OFF to HA
-  bool    state            = false; // last known occupancy state (runtime, not persisted)
+  bool state      = false; // last known motion state: true=Occupied, false=Vacant (runtime, not persisted)
+  bool occEnabled = true;  // occupancy detection active (persisted); false=Disabled via 0x3A
 };
 
 struct AreaState {
@@ -113,6 +112,7 @@ struct AreaState {
   uint32_t lastLevelReqMs = 0;   // debounce refresh requests
   char     name[24] = {};   // user label; empty = default "Area N"
   uint8_t  presetCount = 4; // 1..128, number of presets exposed to HA for this area
+  uint16_t fadeTenths  = 20; // preset fade in 0.1 s steps; default 20 = 2.0 s (LIGHTS only; 0 = instant)
   // Area-type / virtual curtains
   AreaType         areaType = AREA_LIGHTS;
   // Allocated on demand when areaType is set to AREA_CURTAIN (nullptr for light areas).
@@ -173,6 +173,7 @@ public:
   void setChannelName(uint8_t area, uint8_t channel0, const char* name);
   void setAreaName(uint8_t area, const char* name);
   void setPresetName(uint8_t area, uint8_t preset1, const char* name); // 1-based preset, AREA_LIGHTS only
+  void setAreaFade(uint8_t area, uint16_t tenths);  // set fade (0.1 s units); saves + republishes
 
   // Returns the stored custom name for a 1-based preset, or nullptr if not set
   const char* getPresetName(uint8_t area, uint8_t preset1) const {
@@ -223,8 +224,9 @@ public:
   void setHvacFanCtrl (uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0);
 
   // PIR overlay — can be added to any area type (lights, curtain, hvac…)
-  void setPirPresets(uint8_t area, uint8_t occupiedPreset1, uint8_t unoccupiedPreset1);
-  void removePir(uint8_t area);  // disable PIR on this area
+  void enablePir(uint8_t area);                           // allocate PirConfig; publish HA discovery
+  void removePir(uint8_t area);                           // remove PIR; wipe HA entities
+  void setOccupancyEnabled(uint8_t area, bool enabled);   // update occEnabled + publish switch state
 
   // Access
   inline int channelsCount() const { return _chCount; }

@@ -267,6 +267,8 @@ extern void removeHADiscoveryForArea(uint8_t area);
 extern void publishHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
 extern void removeHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
 extern void publishPirState(uint8_t area, bool occupied);
+extern void publishOccSwitchState(uint8_t area, bool enabled);
+extern void removeHAPirEntities(uint8_t area);
 
 void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   int a = touchArea(area);
@@ -324,19 +326,8 @@ void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
   // If 'area' is an HVAC area itself, skip normal preset-entity + level-refresh handling
   if (isHvacSelfArea) return;
 
-  // PIR overlay: map preset to ON/OFF — coexists with any area type, no early return
-  if (a >= 0 && _areas[a].pir) {
-    PirConfig& p = *_areas[a].pir;
-    if (preset0 + 1 == p.occupiedPreset) {
-      p.state = true;
-      publishPirState(area, true);
-      LOGF("[PIR] A%u P%u → OCCUPIED\n", area, preset0 + 1);
-    } else if (preset0 + 1 == p.unoccupiedPreset) {
-      p.state = false;
-      publishPirState(area, false);
-      LOGF("[PIR] A%u P%u → UNOCCUPIED\n", area, preset0 + 1);
-    }
-  }
+  // PIR overlay: motion state is now detected via native 0x31 opcode in handleLogicalFrame.
+  // No preset-based detection needed here.
 
   publishPresetForArea(area);
 
@@ -521,6 +512,35 @@ bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
       if (pref == 0x0D) { noteSetpoint_fp     (area, d2, d3); return true; }                // setpoint fp
       return false;
     }
+    case 0x31: { // Occupancy: [1C][Area][Ch][31][00][0=Suspend/1=Resume][FF][Chk]
+      // b5=1 → Occupied (motion detected); b5=0 → Vacant (area clear)
+      bool occupied = (b[5] == 1);
+      int ai = findArea(area);
+      if (ai >= 0 && _areas[ai].pir) {
+        _areas[ai].pir->state = occupied;
+        if (!_loading) publishPirState(area, occupied);
+      }
+      LOGF("[DyNet] A%u occupancy(0x31) -> %s\n", area, occupied ? "OCCUPIED" : "VACANT");
+      return true;
+    }
+    case 0x3A: { // Disable occupancy for current preset
+      int ai3 = findArea(area);
+      if (ai3 >= 0 && _areas[ai3].pir) {
+        _areas[ai3].pir->occEnabled = false;
+        if (!_loading) publishOccSwitchState(area, false);
+      }
+      LOGF("[DyNet] A%u occupancy DISABLED (0x3A)\n", area);
+      return true;
+    }
+    case 0x3B: { // Enable occupancy for current preset
+      int ai3 = findArea(area);
+      if (ai3 >= 0 && _areas[ai3].pir) {
+        _areas[ai3].pir->occEnabled = true;
+        if (!_loading) publishOccSwitchState(area, true);
+      }
+      LOGF("[DyNet] A%u occupancy ENABLED (0x3B)\n", area);
+      return true;
+    }
     case 0x71: // Ramp channel to level
     case 0x72: // Fade channel to level
     case 0x73: // Fade (minutes)
@@ -613,6 +633,13 @@ void EntityManager::setPresetName(uint8_t area, uint8_t preset1, const char* nam
     publishHADiscoveryForArea(area);  // republish preset select with updated names
     saveEntities();
   }
+}
+
+void EntityManager::setAreaFade(uint8_t area, uint16_t tenths) {
+  int idx = findArea(area);
+  if (idx < 0) return;
+  _areas[idx].fadeTenths = tenths;
+  if (!_loading) saveEntities();
 }
 
 bool EntityManager::deleteArea(uint8_t area) {
@@ -757,6 +784,11 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
 
   _areas[ai].areaType = t;
 
+  // Fade is only meaningful for LIGHTS — clear it when entering CURTAIN or HVAC
+  if (t == AREA_CURTAIN || t == AREA_HVAC) {
+    _areas[ai].fadeTenths = 0;
+  }
+
   // Entering CURTAIN: allocate curtain array + remove channel HA entities
   if (t == AREA_CURTAIN) {
     if (!_areas[ai].curtains) {
@@ -797,28 +829,31 @@ void EntityManager::setAreaType(uint8_t area, AreaType t) {
   }
 }
 
-void EntityManager::setPirPresets(uint8_t area, uint8_t occupiedPreset1, uint8_t unoccupiedPreset1) {
+void EntityManager::enablePir(uint8_t area) {
   int ai = touchArea(area);
   if (ai < 0) return;
-  // Allocate on first use
   if (!_areas[ai].pir) _areas[ai].pir = new (std::nothrow) PirConfig{};
   if (!_areas[ai].pir) return;
-  _areas[ai].pir->occupiedPreset   = occupiedPreset1 ? occupiedPreset1 : 1;
-  _areas[ai].pir->unoccupiedPreset = unoccupiedPreset1 ? unoccupiedPreset1 : 4;
   if (!_loading) { publishHADiscoveryForArea(area); saveEntities(); }
+}
+
+void EntityManager::setOccupancyEnabled(uint8_t area, bool enabled) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].pir) return;
+  _areas[ai].pir->occEnabled = enabled;
+  // Send the appropriate bus command
+  if (enabled) dynet.sendOccupancyEnable(area);   // 0x3B — enable for current preset
+  else         dynet.sendOccupancyDisable(area);   // 0x3A — disable for current preset
+  if (!_loading) { publishOccSwitchState(area, enabled); saveEntities(); }
 }
 
 void EntityManager::removePir(uint8_t area) {
   int ai = findArea(area);
   if (ai < 0 || !_areas[ai].pir) return;
   delete _areas[ai].pir; _areas[ai].pir = nullptr;
-  // Wipe the binary_sensor discovery from HA and republish the area without it
   if (!_loading) {
-    String sid = mqttSafeId(deviceId);
-    if (mqtt.connected()) {
-      String t = String(HA_DISCOVERY_PREFIX) + "/binary_sensor/" + sid + "/a" + area + "_motion/config";
-      mqtt.publish(t.c_str(), "", true);
-    }
+    // Wipe both HA entities (motion binary_sensor + occupancy switch)
+    removeHAPirEntities(area);
     publishHADiscoveryForArea(area);
     saveEntities();
   }

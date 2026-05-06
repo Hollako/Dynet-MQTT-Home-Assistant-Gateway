@@ -192,6 +192,13 @@ bool loadEntities() {
             em.areaAtMut(ai2).presetCount = pc;
           }
         }
+        // Fade time (0.1 s units; LIGHTS default = 20 = 2.0 s; CURTAIN/HVAC = 0)
+        if (v.containsKey("fade")) {
+          int ai2 = em.findArea(area);
+          if (ai2 >= 0) {
+            em.areaAtMut(ai2).fadeTenths = (uint16_t)constrain((int)v["fade"], 0, 600);
+          }
+        }
         // Preset names for AREA_LIGHTS
         if (v.containsKey("pnames") && v["pnames"].is<JsonArray>()) {
           int ai2 = em.findArea(area);
@@ -249,8 +256,7 @@ bool loadEntities() {
             }
             if (ar.pir && v.containsKey("pir")) {
               JsonObject pv = v["pir"].as<JsonObject>();
-              ar.pir->occupiedPreset   = pv["occ"] | 1;
-              ar.pir->unoccupiedPreset = pv["unocc"] | 4;
+              ar.pir->occEnabled = pv["en"] | true;  // default enabled
             }
 
             // Allocate HVAC config on demand
@@ -388,10 +394,10 @@ static bool doWriteEntities() {
     if (a.hasSetpt) o["setptC"] = a.setptC;
     if (a.name[0])  o["n"]      = a.name;
     o["pc"] = a.presetCount ? a.presetCount : 4;
+    if (a.fadeTenths != 20) o["fade"] = a.fadeTenths;  // omit when default (2.0 s) to keep JSON compact
     if (a.pir) {  // PIR overlay — saved independently of area type
       JsonObject pv = o.createNestedObject("pir");
-      pv["occ"]   = a.pir->occupiedPreset;
-      pv["unocc"] = a.pir->unoccupiedPreset;
+      if (!a.pir->occEnabled) pv["en"] = false;  // omit when default (true) to keep JSON compact
     }
     if (a.areaType == DynetEntities::AREA_CURTAIN && a.curtains) {
       o["at"] = (uint8_t)a.areaType;

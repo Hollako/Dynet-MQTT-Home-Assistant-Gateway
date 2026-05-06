@@ -32,3 +32,7 @@ void publishPresetForArea(uint8_t area);
 
 // Publish PIR / motion sensor state to HA binary_sensor
 void publishPirState(uint8_t area, bool occupied);
+// Publish occupancy-switch state (ON=enabled, OFF=disabled)
+void publishOccSwitchState(uint8_t area, bool enabled);
+// Wipe both PIR HA entities (binary_sensor + occ switch) from broker
+void removeHAPirEntities(uint8_t area);

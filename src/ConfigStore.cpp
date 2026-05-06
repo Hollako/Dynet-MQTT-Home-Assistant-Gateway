@@ -250,15 +250,6 @@ bool loadEntities() {
               }
             }
 
-            // Allocate PIR config on demand (PIR is an overlay, not tied to area type)
-            if (v.containsKey("pir") && !ar.pir) {
-              ar.pir = new (std::nothrow) DynetEntities::PirConfig{};
-            }
-            if (ar.pir && v.containsKey("pir")) {
-              JsonObject pv = v["pir"].as<JsonObject>();
-              ar.pir->occEnabled = pv["en"] | true;  // default enabled
-            }
-
             // Allocate HVAC config on demand
             if (ar.areaType == DynetEntities::AREA_HVAC && !ar.hvac) {
               ar.hvac = new (std::nothrow) DynetEntities::HvacConfig{};
@@ -318,6 +309,18 @@ bool loadEntities() {
                   delay(0);
                 }
               }
+            }
+          }
+        }
+        // PIR overlay — must be outside the "at" block because LIGHTS areas have no "at" key
+        if (v.containsKey("pir")) {
+          int ai2 = em.findArea(area);
+          if (ai2 >= 0) {
+            auto& ar = em.areaAtMut(ai2);
+            if (!ar.pir) ar.pir = new (std::nothrow) DynetEntities::PirConfig{};
+            if (ar.pir) {
+              JsonObject pv = v["pir"].as<JsonObject>();
+              ar.pir->occEnabled = pv["en"] | true;  // default enabled
             }
           }
         }

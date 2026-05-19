@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Bash(gh api *)",
+      "Bash(python3 -c \"import json,sys; [print\\(f['name'], f['type'], f['size']\\) for f in json.load\\(sys.stdin\\)]\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); JSON.parse\\(d\\).forEach\\(f=>console.log\\(f.name, f.type, f.size\\)\\)\")",
+      "Bash(node -e \"process.stdin.resume\\(\\);let d='';process.stdin.on\\('data',c=>d+=c\\);process.stdin.on\\('end',\\(\\)=>{JSON.parse\\(d\\).forEach\\(f=>console.log\\(f.name,f.type,f.size\\)\\)}\\)\")",
+      "Bash(where jq *)",
+      "Bash(where gh *)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "PowerShell(Get-ChildItem -Recurse \"C:\\\\Users\\\\L\\\\OneDrive\\\\Documents\\\\GitHub\\\\Dynalite-HA-Integration\" -File | Select-Object @{N='Path';E={$_.FullName.Replace\\('C:\\\\Users\\\\L\\\\OneDrive\\\\Documents\\\\GitHub\\\\Dynalite-HA-Integration\\\\',''\\)}} | Sort-Object Path | Format-Table -AutoSize)",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\L\\\\OneDrive\\\\Documents\\\\GitHub\\\\Dynalite-HA-Integration\\\\custom_components\\\\dynalite_pdeg\\\\translations\")",
+      "Bash(pip install *)",
+      "Bash(python -m pip install pandas xlrd openpyxl)",
+      "Bash(python -c ' *)",
+      "Bash(ls /mnt/c/Users/L/OneDrive/Documents/GitHub/Dynalite-HA-Integration/custom_components/dynalite_pdeg/)"
+    ]
+  }
+}

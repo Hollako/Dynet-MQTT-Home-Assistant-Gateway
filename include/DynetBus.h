@@ -55,9 +55,14 @@ private:
   void write8(const uint8_t f[8]);
   static uint8_t checksum(const uint8_t f[8]); // sum of first 7 bytes (placeholder)
 
-  // RX state
+  // RX state — logical (0x1C) frame assembler
   uint8_t _rxBuf[8] = {0};
   uint8_t _rxPos    = 0;
+
+  // Raw sniffer — captures non-0x1C frames for unknown-frame logging
+  static const uint8_t RAW_BUF = 32;
+  uint8_t _rawBuf[32] = {0};
+  uint8_t _rawPos     = 0;
 
   // Deferred level-request queue
   struct LvlReq { uint8_t area; uint8_t ch0; uint32_t sendAt; };

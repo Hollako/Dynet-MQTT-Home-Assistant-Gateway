@@ -76,15 +76,54 @@ void DynetBus::loop() {
   while (io->available()) {
     uint8_t c = (uint8_t)io->read();
 
-    // Hard resync: 0x1C is start-of-logical-frame
-    if (c == 0x1C) {
-      _rxPos = 0;
-      _rxBuf[_rxPos++] = c;
+    // Known sync bytes — start a new frame assembly
+    bool isSync = (c == 0x1C || c == 0x5C || c == 0xAC);
+
+    if (isSync) {
+      // If we were accumulating a non-0x1C raw frame, flush it now
+      if (_rawPos > 0) {
+        // Print accumulated unknown frame
+        String hex;
+        for (uint8_t i = 0; i < _rawPos; i++) {
+          if (i) hex += ' ';
+          char b[3]; snprintf(b, sizeof(b), "%02X", _rawBuf[i]);
+          hex += b;
+        }
+        LOGF("[DyNet RAW] %s\n", hex.c_str());
+        _rawPos = 0;
+      }
+
+      if (c == 0x1C) {
+        _rxPos = 0;
+        _rxBuf[_rxPos++] = c;
+      } else {
+        // 0x5C or 0xAC — start raw capture
+        _rxPos = 0; // abandon any partial 0x1C frame
+        _rawBuf[_rawPos++] = c;
+      }
       continue;
     }
 
-    // If we haven't seen a start byte yet, ignore
-    if (_rxPos == 0) continue;
+    // Accumulate into the active buffer
+    if (_rawPos > 0) {
+      // Non-0x1C frame in progress
+      if (_rawPos < RAW_BUF) _rawBuf[_rawPos++] = c;
+      if (_rawPos >= RAW_BUF) {
+        // Buffer full — flush
+        String hex;
+        for (uint8_t i = 0; i < _rawPos; i++) {
+          if (i) hex += ' ';
+          char b[3]; snprintf(b, sizeof(b), "%02X", _rawBuf[i]);
+          hex += b;
+        }
+        LOGF("[DyNet RAW] %s\n", hex.c_str());
+        _rawPos = 0;
+      }
+      continue;
+    }
+
+    // 0x1C frame in progress
+    if (_rxPos == 0) continue; // no sync seen yet
 
     _rxBuf[_rxPos++] = c;
     if (_rxPos < 8) continue;
@@ -98,7 +137,6 @@ void DynetBus::loop() {
       DynetEntities::em.handleLogicalFrame(_rxBuf);
 
     } else {
-      // Keep a useful log for diagnosing checksum/framing
       LOGF("[DyNet RX BADCHK] %02X %02X %02X %02X %02X %02X %02X %02X | want=%02X\n",
           _rxBuf[0],_rxBuf[1],_rxBuf[2],_rxBuf[3],_rxBuf[4],_rxBuf[5],_rxBuf[6],_rxBuf[7],
           want);

@@ -1,0 +1,1070 @@
+#include "EntityManager.h"
+#include "Globals.h"
+#include "ConfigStore.h"
+
+using namespace DynetEntities;
+
+//EntityManager em;  // global instance
+namespace DynetEntities {
+  EntityManager em;
+}
+
+extern void publishHADiscoveryForChannel(int idx);
+extern void publishHADiscoveryForArea(uint8_t area);
+extern void publishStateForChannel(int idx);
+extern void publishSensorsForArea(uint8_t area);
+extern void removeHADiscoveryForChannel(uint8_t area, uint8_t ch0, DynetEntities::EntityType type);
+
+static float q025_toC(int16_t steps) { return (float)steps * 0.25f; }
+static float fp_toC(uint8_t hi, uint8_t lo) {
+  int sign = (hi & 0x80) ? -1 : 1;
+  float integ = (float)(hi & 0x7F);
+  float frac  = (float)lo / 100.0f;
+  return sign * (integ + frac);
+}
+
+void EntityManager::begin(int arCapOverride, int chCapOverride) {
+  // Free channel array (no heap pointers inside ChannelState)
+  if (_channels) { delete[] _channels; _channels = nullptr; }
+  // Free area array — must null per-area heap pointers first to avoid double-free
+  if (_areas) {
+    for (int i = 0; i < _arAlloced; i++) {
+      if (_areas[i].curtains) { delete[] _areas[i].curtains; _areas[i].curtains = nullptr; }
+      if (_areas[i].hvac)     { delete   _areas[i].hvac;     _areas[i].hvac     = nullptr; }
+      if (_areas[i].presets)  { delete   _areas[i].presets;  _areas[i].presets  = nullptr; }
+    }
+    delete[] _areas; _areas = nullptr;
+  }
+
+  // dynet_max_channels = channels probed per area during sweep
+  // dynet_max_areas    = area storage cap + sweep upper limit
+  // Overrides take priority (used by loadEntities to avoid dropping saved entities
+  // when the user has lowered the config cap below what is stored on disk).
+  int chPerArea = (chCapOverride > 0)
+                  ? constrain(chCapOverride, 1, (int)DYNET_MAX_CHANNELS)
+                  : (cfg.dynet_max_channels
+                     ? constrain((int)cfg.dynet_max_channels, 1, (int)DYNET_MAX_CHANNELS)
+                     : DYNET_MAX_CHANNELS);
+  int arCap     = (arCapOverride > 0)
+                  ? constrain(arCapOverride, 1, (int)DYNET_MAX_AREAS)
+                  : (cfg.dynet_max_areas
+                     ? constrain((int)cfg.dynet_max_areas, 1, (int)DYNET_MAX_AREAS)
+                     : DYNET_MAX_AREAS);
+  // Total channel pool = areas × channels-per-area.
+  // Capped at 200 on ESP8266 (limited heap), 2000 on ESP32.
+#if defined(ESP8266)
+  int chCap = constrain(arCap * chPerArea, 1, 200);
+#else
+  int chCap = constrain(arCap * chPerArea, 1, 2000);
+#endif
+
+  // Start with NO pre-allocation — arrays grow lazily as areas/channels are discovered.
+  // This means a device with 3 areas uses only 3 × sizeof(AreaState) instead of
+  // arCap × sizeof(AreaState). Slots are allocated in doubling chunks.
+  _chCount = 0; _arCount = 0;
+  _chCap   = chCap; _arCap = arCap;
+  _chAlloced = 0; _arAlloced = 0;
+}
+
+// Grow the area array by doubling (up to _arCap). Returns false on OOM.
+bool EntityManager::growAreaArray() {
+  int newSize = (_arAlloced == 0) ? 4 : min(_arAlloced * 2, _arCap);
+  if (newSize <= _arAlloced) return false;
+  AreaState* n = new (std::nothrow) AreaState[newSize];
+  if (!n) return false;
+  // Copy existing slots; null heap-pointers in OLD array to prevent double-free on delete
+  for (int i = 0; i < _arCount; i++) {
+    n[i] = _areas[i];
+    _areas[i].curtains = nullptr;
+    _areas[i].hvac     = nullptr;
+    _areas[i].presets  = nullptr;
+  }
+  for (int i = _arCount; i < newSize; i++) n[i] = AreaState{};
+  delete[] _areas;
+  _areas = n;
+  _arAlloced = newSize;
+  return true;
+}
+
+// Grow the channel array by doubling (up to _chCap). Returns false on OOM.
+bool EntityManager::growChannelArray() {
+  int newSize = (_chAlloced == 0) ? 8 : min(_chAlloced * 2, _chCap);
+  if (newSize <= _chAlloced) return false;
+  ChannelState* n = new (std::nothrow) ChannelState[newSize];
+  if (!n) return false;
+  for (int i = 0; i < _chCount; i++) n[i] = _channels[i];
+  for (int i = _chCount; i < newSize; i++) n[i] = ChannelState{};
+  delete[] _channels;
+  _channels = n;
+  _chAlloced = newSize;
+  return true;
+}
+
+int EntityManager::findArea(uint8_t area) const {
+  for (int i = 0; i < _arCount; i++) if (_areas[i].area == area) return i;
+  return -1;
+}
+int EntityManager::touchArea(uint8_t area) {
+  int idx = findArea(area);
+  if (idx >= 0) { _areas[idx].present = true; return idx; }
+  if (_arCount >= _arCap) return -1;
+  if (_arCount >= _arAlloced && !growAreaArray()) return -1;  // OOM
+  _areas[_arCount] = AreaState{};
+  _areas[_arCount].area = area;
+  _areas[_arCount].present = true;
+  int created = _arCount++;
+  // Suppress publish/save during bulk load
+  if (!_loading) {
+    publishHADiscoveryForArea(area);
+    saveEntities();
+  }
+  return created;
+}
+
+int EntityManager::findChannel(uint8_t area, uint8_t channel0) const {
+  for (int i = 0; i < _chCount; i++)
+    if (_channels[i].present && _channels[i].area == area && _channels[i].channel0 == channel0) return i;
+  return -1;
+}
+int EntityManager::touchChannel(uint8_t area, uint8_t channel0) {
+  int idx = findChannel(area, channel0);
+  if (idx >= 0) { _channels[idx].present = true; return idx; }
+  if (_chCount >= _chCap) return -1;
+  if (_chCount >= _chAlloced && !growChannelArray()) return -1;  // OOM
+  _channels[_chCount] = ChannelState{};
+  _channels[_chCount].present  = true;
+  _channels[_chCount].area     = area;
+  _channels[_chCount].channel0 = channel0;
+  _channels[_chCount].type     = LIGHT_DIMMABLE; // default
+  _channels[_chCount].isOn     = false;
+  _channels[_chCount].levelPct = 0;
+  touchArea(area);
+  int created = _chCount++;
+  // Suppress publish/save during bulk load
+  if (!_loading) {
+    publishHADiscoveryForChannel(created);
+    publishStateForChannel(created);   // publish initial OFF state so HA shows entity immediately
+    saveEntities();
+  }
+  return created;
+}
+
+void EntityManager::setChannelType(uint8_t area, uint8_t channel0, EntityType t) {
+  int i = touchChannel(area, channel0);
+  if (i < 0) return;
+
+  EntityType oldType = _channels[i].type;
+
+  // ── Leaving CURTAIN → free the slave channel ────────────────────────────
+  if (oldType == CURTAIN && t != CURTAIN) {
+    _channels[i].curtainMove    = CURTAIN_IDLE;
+    _channels[i].curtainActionAt = 0;
+    int si = findChannel(area, channel0 + 1);
+    if (si >= 0 && _channels[si].isCurtainSlave) {
+      removeHADiscoveryForChannel(area, channel0 + 1, CURTAIN);
+      if (si != _chCount - 1) _channels[si] = _channels[_chCount - 1];
+      _chCount--;
+    }
+  }
+
+  // Remove the *old* HA entity for this channel before switching type.
+  // removeHADiscoveryForChannel wipes light + switch + cover so it covers
+  // every direction (light→cover, cover→light, etc.).
+  if (oldType != t) {
+    removeHADiscoveryForChannel(area, channel0, oldType);
+  }
+
+  _channels[i].type = t;
+
+  // ── Entering CURTAIN → auto-create/claim slave channel ──────────────────
+  if (t == CURTAIN && !_channels[i].isCurtainSlave) {
+    uint8_t slaveCh = channel0 + 1;
+    int si = findChannel(area, slaveCh);
+    if (si >= 0) {
+      // Channel already exists — retire its current HA entity then mark as slave
+      removeHADiscoveryForChannel(area, slaveCh, _channels[si].type);
+      _channels[si].type           = CURTAIN;
+      _channels[si].isCurtainSlave = true;
+    } else {
+      // Create slave silently (no HA publish, no save during creation)
+      bool prev = _loading; _loading = true;
+      si = touchChannel(area, slaveCh);
+      _loading = prev;
+      if (si >= 0) {
+        _channels[si].type           = CURTAIN;
+        _channels[si].isCurtainSlave = true;
+      }
+    }
+  }
+
+  publishHADiscoveryForChannel(i);
+  saveEntities();
+}
+
+void EntityManager::setChannelLevel(uint8_t area, uint8_t channel0, uint8_t pct) {
+  if (pct > 100) pct = 100;
+  int i = touchChannel(area, channel0);
+  if (i >= 0) {
+    _channels[i].levelPct = pct;
+    _channels[i].isOn = (pct > 0);
+    publishStateForChannel(i);
+  }
+  // Check if any HVAC area uses this channel as a level-based mode/fan source
+  checkHvacLevelSources(area, channel0, pct);
+}
+
+void EntityManager::checkHvacLevelSources(uint8_t area, uint8_t ch0, uint8_t pct) {
+  for (int i = 0; i < _arCount; i++) {
+    if (!_areas[i].present || _areas[i].areaType != AREA_HVAC || !_areas[i].hvac) continue;
+    auto& h      = *_areas[i].hvac;
+    uint8_t hvacArea   = _areas[i].area;
+    uint8_t modeTarget = h.modeArea ? h.modeArea : hvacArea;
+    uint8_t fanTarget  = h.fanArea  ? h.fanArea  : hvacArea;
+    bool changed = false;
+
+    if (h.modeCtrlType == HVAC_CTRL_LEVEL && modeTarget == area && h.modeChannel0 == ch0) {
+      for (uint8_t mi = 0; mi < MAX_HVAC_MODES; mi++) {
+        if (h.modes[mi].used && h.modes[mi].level == pct) {
+          strncpy(h.currentMode, h.modes[mi].name, sizeof(h.currentMode) - 1);
+          h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+          LOGF("[HVAC] A%u ch A%u Ch%u=%u%% -> mode '%s'\n",
+               hvacArea, area, ch0 + 1, pct, h.currentMode);
+          changed = true;
+          break;  // only one mode maps to a given level
+        }
+      }
+    }
+    if (h.fanCtrlType == HVAC_CTRL_LEVEL && fanTarget == area && h.fanChannel0 == ch0) {
+      for (uint8_t fi = 0; fi < MAX_HVAC_FANMODES; fi++) {
+        if (h.fanModes[fi].used && h.fanModes[fi].level == pct) {
+          strncpy(h.currentFanMode, h.fanModes[fi].name, sizeof(h.currentFanMode) - 1);
+          h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+          LOGF("[HVAC] A%u ch A%u Ch%u=%u%% -> fan '%s'\n",
+               hvacArea, area, ch0 + 1, pct, h.currentFanMode);
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      publishSensorsForArea(hvacArea);
+      saveEntities();
+    }
+  }
+}
+void EntityManager::setChannelOnOff(uint8_t area, uint8_t channel0, bool on) {
+  int i = touchChannel(area, channel0);
+  if (i >= 0) {
+    _channels[i].isOn = on;
+    if (!on) _channels[i].levelPct = 0;
+    else if (_channels[i].levelPct == 0) _channels[i].levelPct = 100;
+    publishStateForChannel(i);              // NEW
+  }
+}
+
+extern void publishPresetForArea(uint8_t area);
+extern void removeHADiscoveryForArea(uint8_t area);
+extern void publishHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
+extern void removeHADiscoveryForAreaCurtainEntry(uint8_t area, uint8_t idx);
+extern void publishPirState(uint8_t area, bool occupied);
+extern void publishOccSwitchState(uint8_t area, bool enabled);
+extern void removeHAPirEntities(uint8_t area);
+
+void EntityManager::noteReportPreset(uint8_t area, uint8_t preset0) {
+  int a = touchArea(area);
+  uint8_t prev = 0xFF;
+  if (a >= 0) {
+    prev = _areas[a].preset0;
+    _areas[a].preset0 = preset0;
+  }
+
+  // ── Scan all HVAC areas: check if this preset drives their mode or fan speed ─
+  // Supports both same-area (modeArea==0) and cross-area (modeArea==otherArea).
+  bool isHvacSelfArea = false;  // true if 'area' itself is an HVAC area
+  for (int i = 0; i < _arCount; i++) {
+    if (!_areas[i].present || _areas[i].areaType != AREA_HVAC || !_areas[i].hvac) continue;
+    auto& h = *_areas[i].hvac;
+    uint8_t hvacArea   = _areas[i].area;
+    uint8_t modeTarget = h.modeArea ? h.modeArea : hvacArea;
+    uint8_t fanTarget  = h.fanArea  ? h.fanArea  : hvacArea;
+    bool changed = false;
+
+    if (h.modeCtrlType == HVAC_CTRL_PRESET && modeTarget == area) {
+      for (uint8_t mi = 0; mi < MAX_HVAC_MODES; mi++) {
+        if (h.modes[mi].used && h.modes[mi].preset1 == preset0 + 1) {
+          strncpy(h.currentMode, h.modes[mi].name, sizeof(h.currentMode) - 1);
+          h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+          LOGF("[HVAC] A%u preset A%u P%u -> mode '%s'\n",
+               hvacArea, area, preset0 + 1, h.currentMode);
+          changed = true;
+        }
+      }
+    }
+    if (h.fanCtrlType == HVAC_CTRL_PRESET && fanTarget == area) {
+      for (uint8_t fi = 0; fi < MAX_HVAC_FANMODES; fi++) {
+        if (h.fanModes[fi].used && h.fanModes[fi].preset1 == preset0 + 1) {
+          strncpy(h.currentFanMode, h.fanModes[fi].name, sizeof(h.currentFanMode) - 1);
+          h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+          LOGF("[HVAC] A%u preset A%u P%u -> fan '%s'\n",
+               hvacArea, area, preset0 + 1, h.currentFanMode);
+          changed = true;
+        }
+      }
+    }
+    // Publish sensors whenever a preset arrives from any configured source area
+    if (modeTarget == area || fanTarget == area) {
+      LOGF("[HVAC] A%u notePreset A%u P%u: mode='%s' fan='%s'\n",
+           hvacArea, area, preset0 + 1,
+           h.currentMode[0] ? h.currentMode : "(none)",
+           h.currentFanMode[0] ? h.currentFanMode : "(none)");
+      publishSensorsForArea(hvacArea);
+      if (changed) saveEntities();
+    }
+    if (hvacArea == area) isHvacSelfArea = true;
+  }
+
+  // If 'area' is an HVAC area itself, skip normal preset-entity + level-refresh handling
+  if (isHvacSelfArea) return;
+
+  // PIR overlay: motion state is now detected via native 0x31 opcode in handleLogicalFrame.
+  // No preset-based detection needed here.
+
+  publishPresetForArea(area);
+
+  // Only schedule level refresh when preset actually changes
+  if (prev == preset0 && prev != 0xFF) return;
+  uint32_t now = millis();
+  if (a >= 0 && (now - _areas[a].lastLevelReqMs) < 300) return;
+  if (a >= 0) _areas[a].lastLevelReqMs = now;
+  dynet.scheduleAreaLevelReqs(area, 400);
+  LOGF("[DyNet] A%u preset->P%u (was P%u) => scheduled level refresh\n",
+       area, preset0 + 1, (prev == 0xFF ? 0 : prev + 1));
+  saveEntities();
+}
+
+void EntityManager::noteActualTemp_q025(uint8_t area, int16_t steps) {
+  int a = touchArea(area);
+  if (a >= 0) {
+    _areas[a].hasTemp = true; _areas[a].tempC = q025_toC(steps);
+    publishSensorsForArea(area);            // NEW
+    saveEntities(); 
+  }
+}
+void EntityManager::noteSetpoint_q025(uint8_t area, int16_t steps) {
+  int a = touchArea(area);
+  if (a >= 0) {
+    _areas[a].hasSetpt = true; _areas[a].setptC = q025_toC(steps);
+    publishSensorsForArea(area);            // NEW
+    saveEntities(); 
+  }
+}
+void EntityManager::noteActualTemp_fp(uint8_t area, uint8_t hi, uint8_t lo) {
+  int a = touchArea(area);
+  if (a >= 0) {
+    _areas[a].hasTemp = true; _areas[a].tempC = fp_toC(hi, lo);
+    publishSensorsForArea(area);            // NEW
+    saveEntities(); 
+  }
+}
+void EntityManager::noteSetpoint_fp(uint8_t area, uint8_t hi, uint8_t lo) {
+  int a = touchArea(area);
+  if (a >= 0) {
+    _areas[a].hasSetpt = true; _areas[a].setptC = fp_toC(hi, lo);
+    publishSensorsForArea(area);            // NEW
+    saveEntities(); 
+  }
+}
+
+// Interpret logical frames (0x1C)
+static inline uint8_t pctFromDyn(uint8_t v) {
+  // DyNet: 0x01=100%, 0xFF=0%
+  if (v == 0xFF) return 0;
+  if (v <= 1)    return 100;
+  // integer map 0x02..0xFE -> 99..1
+  return (uint8_t)(100 - ((v - 1) * 99 / 0xFE));
+}
+
+int EntityManager::requestLevelsForArea(uint8_t area, uint8_t fallbackProbe) {
+  int sent = 0;
+  for (int i = 0; i < _chCount; ++i) {
+    const ChannelState& c = _channels[i];
+    if (c.present && c.area == area) {
+      dynet.sendRequestChannelLevel(area, c.channel0);
+      delay(2);
+      sent++;
+    }
+  }
+  if (sent == 0 && fallbackProbe > 0) {
+    uint8_t lim = fallbackProbe;
+    if (lim > DYNET_MAX_CHANNELS) lim = DYNET_MAX_CHANNELS;
+    for (uint8_t ch = 0; ch < lim; ++ch) {
+      dynet.sendRequestChannelLevel(area, ch);
+      delay(2);
+      sent++;
+    }
+  }
+  return sent;
+}
+
+// Inverse of the send mapping for 0x64: Code->idx (0..7)
+static inline int8_t idxFrom64Code(uint8_t code) {
+  switch (code) {
+    case 0x00: return 0; // P1
+    case 0x01: return 1; // P2
+    case 0x02: return 2; // P3
+    case 0x03: return 3; // P4
+    case 0x0A: return 4; // P5
+    case 0x0B: return 5; // P6
+    case 0x0C: return 6; // P7
+    case 0x0D: return 7; // P8
+    default:   return -1;
+  }
+}
+
+bool EntityManager::handleLogicalFrame(const uint8_t b[8]) {
+  if (b[0] != 0x1C) return false;
+  const uint8_t area = b[1];
+
+  // -------- Variant B: opcode in b[2] --------
+
+  // Legacy preset recall: [1C][Area][00][Code][Fade][Bank][Join][Chk]
+  // Used by physical Dynalite panels (same code→index mapping as 0x64).
+  // idxFrom64Code() returns -1 for unknown codes (e.g. 0x63 = requestPreset query), so
+  // those fall through harmlessly.
+  if (b[2] == 0x00) {
+    const uint8_t code = b[3];
+    const uint8_t bank = b[5];
+    int8_t idx = idxFrom64Code(code);
+    if (idx >= 0) {
+      uint8_t preset0 = (uint8_t)(bank * 8 + idx);
+      noteReportPreset(area, preset0);
+      dynet.scheduleAreaLevelReqs(area, 400);
+      LOGF("[DyNet] A%u preset(0x00)->P%u; scheduled level refresh\n", area, preset0 + 1);
+      return true;
+    }
+    return false;
+  }
+
+  // Recall Preset with bank: [1C][Area][64][Code][Fade/??][Bank][Join][Chk]
+  if (b[2] == 0x64) {
+    const uint8_t code = b[3];   // 00,01,02,03,0A,0B,0C,0D
+    const uint8_t bank = b[5];   // 0->P1..P8, 1->P9..P16, ...
+    int8_t idx = idxFrom64Code(code);  // 0..7 or -1
+    if (idx < 0) return false;
+
+    uint8_t preset0 = (uint8_t)(bank * 8 + idx);  // 0-origin
+    noteReportPreset(area, preset0);
+
+    dynet.scheduleAreaLevelReqs(area, 400);
+    LOGF("[DyNet] A%u preset(0x64)->P%u; scheduled level refresh\n", area, preset0 + 1);
+    return true;
+  }
+
+  // Preset select linear: [1C][Area][65][Preset0][FadeLo][FadeHi][Join][Chk]
+  if (b[2] == 0x65) {
+    uint8_t preset0 = b[3];
+    noteReportPreset(area, preset0);
+
+    dynet.scheduleAreaLevelReqs(area, 400);
+    LOGF("[DyNet] A%u preset(0x65)->P%u; scheduled level refresh\n", area, preset0 + 1);
+    return true;
+  }
+
+  // Fade-to-preset: [1C][Area][6B][FF][Preset0][Fade][Join][Chk]
+  if (b[2] == 0x6B) {
+    uint8_t preset0 = b[4];
+    noteReportPreset(area, preset0);
+
+    dynet.scheduleAreaLevelReqs(area, 400);
+    LOGF("[DyNet] A%u preset(0x6B)->P%u; scheduled level refresh\n", area, preset0 + 1);
+    return true;
+  }
+
+  // -------- Variant A: opcode in b[3] ------------------------------
+  switch (b[3]) {
+    case 0x60: { // Report Channel Level: [1C][Area][Ch0][60][Target][Current]...
+      uint8_t ch0 = b[2];
+      uint8_t tgt = b[4];     // we use TARGET level
+      setChannelLevel(area, ch0, pctFromDyn(tgt));
+      return true;
+    }
+    case 0x62: { // Report Preset (Area): [1C][Area][Preset0][62]...
+      uint8_t preset0 = b[2];
+      noteReportPreset(area, preset0);
+      return true;
+    }
+    case 0x48: { // User Preference Write: [1C][Area][Pref][48][Hi][Lo][Join][Chk]
+      // Sent by physical panels (and by us) when writing a preference value.
+      // We snoop our own bus traffic so we can keep state in sync when a panel changes the setpoint.
+      uint8_t pref = b[2];
+      uint8_t d2   = b[4], d3 = b[5];
+      if (pref == 0x07) { noteSetpoint_q025(area, (int16_t)((d2<<8)|d3)); return true; } // setpoint q0.25
+      if (pref == 0x0D) { noteSetpoint_fp  (area, d2, d3); return true; }                // setpoint fp
+      return false;
+    }
+    case 0x4A: { // User Preference Report: [1C][Area][Pref][4A][Hi][Lo][Join][Chk]
+      // Controller response to a 0x49 query — or unsolicited broadcast.
+      uint8_t pref = b[2];
+      uint8_t d2   = b[4], d3 = b[5];
+      if (pref == 0x06) { noteActualTemp_q025(area, (int16_t)((d2<<8)|d3)); return true; } // actual temp q0.25
+      if (pref == 0x07) { noteSetpoint_q025   (area, (int16_t)((d2<<8)|d3)); return true; } // setpoint q0.25
+      if (pref == 0x0C) { noteActualTemp_fp   (area, d2, d3); return true; }                // actual temp fp
+      if (pref == 0x0D) { noteSetpoint_fp     (area, d2, d3); return true; }                // setpoint fp
+      return false;
+    }
+    case 0x31: { // Occupancy: [1C][Area][Ch][31][00][0=Suspend/1=Resume][FF][Chk]
+      // b5=1 → Occupied (motion detected); b5=0 → Vacant (area clear)
+      bool occupied = (b[5] == 1);
+      int ai = findArea(area);
+      if (ai >= 0 && _areas[ai].pir) {
+        _areas[ai].pir->state = occupied;
+        if (!_loading) publishPirState(area, occupied);
+      }
+      LOGF("[DyNet] A%u occupancy(0x31) -> %s\n", area, occupied ? "OCCUPIED" : "VACANT");
+      return true;
+    }
+    case 0x3A: { // Disable occupancy for current preset
+      int ai3 = findArea(area);
+      if (ai3 >= 0 && _areas[ai3].pir) {
+        _areas[ai3].pir->occEnabled = false;
+        if (!_loading) publishOccSwitchState(area, false);
+      }
+      LOGF("[DyNet] A%u occupancy DISABLED (0x3A)\n", area);
+      return true;
+    }
+    case 0x3B: { // Enable occupancy for current preset
+      int ai3 = findArea(area);
+      if (ai3 >= 0 && _areas[ai3].pir) {
+        _areas[ai3].pir->occEnabled = true;
+        if (!_loading) publishOccSwitchState(area, true);
+      }
+      LOGF("[DyNet] A%u occupancy ENABLED (0x3B)\n", area);
+      return true;
+    }
+    case 0x71: // Ramp channel to level
+    case 0x72: // Fade channel to level
+    case 0x73: // Fade (minutes)
+    case 0x74: // Fade to off
+    case 0x75: // Fade to on
+    case 0x68: // Ramp to off
+    case 0x69: // Ramp to on
+    case 0x5F: // Ramp lit channels toward level
+    {
+      uint8_t ch0 = b[2];
+
+      // Ensure discovery happens even if we never saw a 0x60 yet
+      touchChannel(area, ch0);                 // ensure discovered
+      dynet.scheduleLevelReq(area, ch0, 300);  // non-blocking: request level after 300ms
+      LOGF("[DyNet] A%u ch%u cmd(0x%02X) -> scheduled level req\n", area, ch0, b[3]);
+      return true;
+    }
+    default: break;
+  }
+
+  return false;
+}
+
+// ---- Manual delete ----------------------------------------------
+
+bool EntityManager::deleteChannel(uint8_t area, uint8_t channel0) {
+  int idx = -1;
+  for (int i = 0; i < _chCount; i++) {
+    if (_channels[i].present && _channels[i].area == area && _channels[i].channel0 == channel0) {
+      idx = i; break;
+    }
+  }
+  if (idx < 0) return false;
+
+  EntityType type = _channels[idx].type;
+
+  // Remove from HA
+  removeHADiscoveryForChannel(area, channel0, type);
+
+  // Compact: swap with last element then shrink
+  if (idx != _chCount - 1) _channels[idx] = _channels[_chCount - 1];
+  _chCount--;
+
+  // If area now has no channels, remove it too
+  bool hasMore = false;
+  for (int i = 0; i < _chCount; i++) {
+    if (_channels[i].present && _channels[i].area == area) { hasMore = true; break; }
+  }
+  if (!hasMore) deleteArea(area);
+
+  saveEntities();
+  LOGF("[EM] deleted A%u C%u\n", area, channel0);
+  return true;
+}
+
+void EntityManager::setChannelName(uint8_t area, uint8_t channel0, const char* name) {
+  int idx = findChannel(area, channel0);
+  if (idx < 0) return;
+  strncpy(_channels[idx].name, name ? name : "", sizeof(_channels[idx].name) - 1);
+  _channels[idx].name[sizeof(_channels[idx].name) - 1] = '\0';
+  if (!_loading) {
+    publishHADiscoveryForChannel(idx);  // update HA entity name
+    saveEntities();
+  }
+}
+
+void EntityManager::setAreaName(uint8_t area, const char* name) {
+  int idx = findArea(area);
+  if (idx < 0) return;
+  strncpy(_areas[idx].name, name ? name : "", sizeof(_areas[idx].name) - 1);
+  _areas[idx].name[sizeof(_areas[idx].name) - 1] = '\0';
+  if (!_loading) {
+    publishHADiscoveryForArea(area);    // update HA entity names
+    saveEntities();
+  }
+}
+
+void EntityManager::setPresetName(uint8_t area, uint8_t preset1, const char* name) {
+  int idx = findArea(area);
+  if (idx < 0 || preset1 < 1 || preset1 > MAX_LIGHT_PRESETS) return;
+  auto& as = _areas[idx];
+  // Allocate on first use
+  if (!as.presets) {
+    as.presets = new (std::nothrow) AreaPresetNames{};
+    if (!as.presets) return;
+  }
+  strncpy(as.presets->n[preset1 - 1], name ? name : "", sizeof(as.presets->n[preset1 - 1]) - 1);
+  as.presets->n[preset1 - 1][sizeof(as.presets->n[preset1 - 1]) - 1] = '\0';
+  if (!_loading) {
+    publishHADiscoveryForArea(area);  // republish preset select with updated names
+    saveEntities();
+  }
+}
+
+void EntityManager::setAreaFade(uint8_t area, uint16_t tenths) {
+  int idx = findArea(area);
+  if (idx < 0) return;
+  _areas[idx].fadeTenths = tenths;
+  if (!_loading) saveEntities();
+}
+
+bool EntityManager::deleteArea(uint8_t area) {
+  // Delete all channels belonging to this area
+  for (int i = _chCount - 1; i >= 0; i--) {
+    if (_channels[i].present && _channels[i].area == area) {
+      removeHADiscoveryForChannel(area, _channels[i].channel0, _channels[i].type);
+      if (i != _chCount - 1) _channels[i] = _channels[_chCount - 1];
+      _chCount--;
+    }
+  }
+
+  // Remove the area entry
+  int ai = findArea(area);
+  if (ai >= 0) {
+    removeHADiscoveryForArea(area);
+    // Free this area's heap pointers before overwriting the slot
+    if (_areas[ai].curtains) { delete[] _areas[ai].curtains; _areas[ai].curtains = nullptr; }
+    if (_areas[ai].hvac)     { delete   _areas[ai].hvac;     _areas[ai].hvac     = nullptr; }
+    if (_areas[ai].pir)      { delete   _areas[ai].pir;      _areas[ai].pir      = nullptr; }
+    if (ai != _arCount - 1) {
+      _areas[ai] = _areas[_arCount - 1];
+      _areas[_arCount - 1].curtains = nullptr; // prevent double-free of moved pointers
+      _areas[_arCount - 1].hvac     = nullptr;
+      _areas[_arCount - 1].pir      = nullptr;
+    }
+    _arCount--;
+  }
+
+  saveEntities();
+  LOGF("[EM] deleted Area %u\n", area);
+  return (ai >= 0);
+}
+
+// ---- Curtain control -----------------------------------------------
+
+void EntityManager::commandCurtain(uint8_t area, uint8_t ch0, const char* cmd) {
+  int mi = findChannel(area, ch0);
+  if (mi < 0 || _channels[mi].type != CURTAIN || _channels[mi].isCurtainSlave) return;
+
+  ChannelState& m = _channels[mi];
+  uint8_t upCh   = ch0;
+  uint8_t downCh = ch0 + 1;
+
+  if (strcmp(cmd, "OPEN") == 0) {
+    // Interlock: stop DOWN relay immediately, then after 500ms start UP relay
+    dynet.sendFadeToLevel_1s(area, downCh, 0, 0x02);
+    m.curtainMove     = CURTAIN_DELAY_OPEN;
+    m.curtainActionAt = millis() + 500;
+    LOGF("[Curtain] A%u Ch%u OPEN: DOWN off, delay 500ms\n", area, upCh + 1);
+
+  } else if (strcmp(cmd, "CLOSE") == 0) {
+    // Interlock: stop UP relay immediately, then after 500ms start DOWN relay
+    dynet.sendFadeToLevel_1s(area, upCh, 0, 0x02);
+    m.curtainMove     = CURTAIN_DELAY_CLOSE;
+    m.curtainActionAt = millis() + 500;
+    LOGF("[Curtain] A%u Ch%u CLOSE: UP off, delay 500ms\n", area, upCh + 1);
+
+  } else if (strcmp(cmd, "STOP") == 0) {
+    dynet.sendFadeToLevel_1s(area, upCh,   0, 0x02);
+    dynet.sendFadeToLevel_1s(area, downCh, 0, 0x02);
+    m.curtainMove     = CURTAIN_IDLE;
+    m.curtainActionAt = 0;
+    LOGF("[Curtain] A%u Ch%u STOP: both off\n", area, upCh + 1);
+  }
+}
+
+void EntityManager::setCurtainTime(uint8_t area, uint8_t ch0, uint8_t seconds) {
+  int mi = findChannel(area, ch0);
+  if (mi < 0 || _channels[mi].type != CURTAIN || _channels[mi].isCurtainSlave) return;
+  _channels[mi].curtainTimeSec = seconds;
+  saveEntities();
+}
+
+void EntityManager::pollCurtains() {
+  uint32_t now = millis();
+  for (int i = 0; i < _chCount; i++) {
+    ChannelState& c = _channels[i];
+    if (c.type != CURTAIN || c.isCurtainSlave) continue;
+    if (c.curtainMove == CURTAIN_IDLE) continue;
+    if ((int32_t)(now - c.curtainActionAt) < 0) continue; // not yet
+
+    uint8_t upCh   = c.channel0;
+    uint8_t downCh = c.channel0 + 1;
+
+    switch (c.curtainMove) {
+      case CURTAIN_DELAY_OPEN:
+        dynet.sendFadeToLevel_1s(c.area, upCh, 100, 0x02);
+        if (c.curtainTimeSec > 0) {
+          c.curtainMove     = CURTAIN_OPENING;
+          c.curtainActionAt = now + (uint32_t)c.curtainTimeSec * 1000UL;
+        } else {
+          c.curtainMove     = CURTAIN_IDLE;
+          c.curtainActionAt = 0;
+        }
+        LOGF("[Curtain] A%u Ch%u: UP relay ON (travel %us)\n", c.area, upCh+1, c.curtainTimeSec);
+        break;
+
+      case CURTAIN_DELAY_CLOSE:
+        dynet.sendFadeToLevel_1s(c.area, downCh, 100, 0x02);
+        if (c.curtainTimeSec > 0) {
+          c.curtainMove     = CURTAIN_CLOSING;
+          c.curtainActionAt = now + (uint32_t)c.curtainTimeSec * 1000UL;
+        } else {
+          c.curtainMove     = CURTAIN_IDLE;
+          c.curtainActionAt = 0;
+        }
+        LOGF("[Curtain] A%u Ch%u: DOWN relay ON (travel %us)\n", c.area, downCh+1, c.curtainTimeSec);
+        break;
+
+      case CURTAIN_OPENING:
+      case CURTAIN_CLOSING:
+        // Travel time expired — stop both relays
+        dynet.sendFadeToLevel_1s(c.area, upCh,   0, 0x02);
+        dynet.sendFadeToLevel_1s(c.area, downCh, 0, 0x02);
+        c.curtainMove     = CURTAIN_IDLE;
+        c.curtainActionAt = 0;
+        LOGF("[Curtain] A%u Ch%u: travel time expired, both off\n", c.area, upCh+1);
+        break;
+
+      default: break;
+    }
+  }
+}
+
+// ---- Area Curtain (virtual — preset-based) --------------------------
+
+void EntityManager::setAreaType(uint8_t area, AreaType t) {
+  int ai = touchArea(area);
+  if (ai < 0) return;
+  if (_areas[ai].areaType == t) return;
+
+  // Leaving CURTAIN: free curtain array
+  if (_areas[ai].areaType == AREA_CURTAIN && t != AREA_CURTAIN) {
+    if (_areas[ai].curtains) { delete[] _areas[ai].curtains; _areas[ai].curtains = nullptr; }
+  }
+  // Leaving HVAC: free hvac config
+  if (_areas[ai].areaType == AREA_HVAC && t != AREA_HVAC) {
+    if (_areas[ai].hvac) { delete _areas[ai].hvac; _areas[ai].hvac = nullptr; }
+  }
+  // PIR is not an area type — it is an independent overlay; no action here
+
+  _areas[ai].areaType = t;
+
+  // Fade is only meaningful for LIGHTS — clear it when entering CURTAIN or HVAC
+  if (t == AREA_CURTAIN || t == AREA_HVAC) {
+    _areas[ai].fadeTenths = 0;
+  }
+
+  // Entering CURTAIN: allocate curtain array + remove channel HA entities
+  if (t == AREA_CURTAIN) {
+    if (!_areas[ai].curtains) {
+      _areas[ai].curtains = new (std::nothrow) AreaCurtainEntry[MAX_CURTAINS_PER_AREA];
+      if (_areas[ai].curtains) {
+        for (int i = 0; i < MAX_CURTAINS_PER_AREA; i++) _areas[ai].curtains[i] = AreaCurtainEntry{};
+      }
+    }
+    for (int i = 0; i < _chCount; i++) {
+      if (_channels[i].area == area && _channels[i].present && !_channels[i].isCurtainSlave) {
+        removeHADiscoveryForChannel(area, _channels[i].channel0, _channels[i].type);
+      }
+    }
+  }
+  // Entering HVAC: allocate hvac config
+  if (t == AREA_HVAC) {
+    if (!_areas[ai].hvac) {
+      _areas[ai].hvac = new (std::nothrow) HvacConfig{};
+    }
+    // Seed a default setpoint (22 °C) so the climate entity shows a value immediately
+    // without waiting for a Dynalite opcode — persisted on next saveEntities()
+    if (!_areas[ai].hasSetpt || isnan(_areas[ai].setptC)) {
+      _areas[ai].hasSetpt = true;
+      _areas[ai].setptC   = 22.0f;
+    }
+    // Hide all channel entities — HVAC areas are controlled via climate entity
+    for (int i = 0; i < _chCount; i++) {
+      if (_channels[i].area == area && _channels[i].present && !_channels[i].isCurtainSlave) {
+        removeHADiscoveryForChannel(area, _channels[i].channel0, _channels[i].type);
+      }
+    }
+  }
+  // Wipe all stale HA entities for this area then publish the correct new ones
+  if (!_loading) {
+    removeHADiscoveryForArea(area);
+    publishHADiscoveryForArea(area);
+    saveEntities();
+  }
+}
+
+void EntityManager::enablePir(uint8_t area) {
+  int ai = touchArea(area);
+  if (ai < 0) return;
+  if (!_areas[ai].pir) _areas[ai].pir = new (std::nothrow) PirConfig{};
+  if (!_areas[ai].pir) return;
+  if (!_loading) { publishHADiscoveryForArea(area); saveEntities(); }
+}
+
+void EntityManager::setOccupancyEnabled(uint8_t area, bool enabled) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].pir) return;
+  _areas[ai].pir->occEnabled = enabled;
+  // Send the appropriate bus command
+  if (enabled) dynet.sendOccupancyEnable(area);   // 0x3B — enable for current preset
+  else         dynet.sendOccupancyDisable(area);   // 0x3A — disable for current preset
+  if (!_loading) { publishOccSwitchState(area, enabled); saveEntities(); }
+}
+
+void EntityManager::removePir(uint8_t area) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].pir) return;
+  delete _areas[ai].pir; _areas[ai].pir = nullptr;
+  if (!_loading) {
+    // Wipe both HA entities (motion binary_sensor + occupancy switch)
+    removeHAPirEntities(area);
+    publishHADiscoveryForArea(area);
+    saveEntities();
+  }
+}
+
+int EntityManager::addAreaCurtain(uint8_t area) {
+  int ai = findArea(area);
+  if (ai < 0) return -1;
+  // Allocate on demand (in case setAreaType was bypassed, e.g. during load)
+  if (!_areas[ai].curtains) {
+    _areas[ai].curtains = new (std::nothrow) AreaCurtainEntry[MAX_CURTAINS_PER_AREA];
+    if (!_areas[ai].curtains) return -1;
+    for (int i = 0; i < MAX_CURTAINS_PER_AREA; i++) _areas[ai].curtains[i] = AreaCurtainEntry{};
+  }
+  for (int i = 0; i < MAX_CURTAINS_PER_AREA; i++) {
+    if (!_areas[ai].curtains[i].used) {
+      _areas[ai].curtains[i] = AreaCurtainEntry{};
+      _areas[ai].curtains[i].used = true;
+      snprintf(_areas[ai].curtains[i].name, sizeof(_areas[ai].curtains[i].name),
+               "Curtain %d", i + 1);
+      publishHADiscoveryForAreaCurtainEntry(area, i);
+      saveEntities();
+      return i;
+    }
+  }
+  return -1; // all slots full
+}
+
+void EntityManager::deleteAreaCurtain(uint8_t area, uint8_t idx) {
+  int ai = findArea(area);
+  if (ai < 0 || idx >= MAX_CURTAINS_PER_AREA || !_areas[ai].curtains) return;
+  if (!_areas[ai].curtains[idx].used) return;
+  removeHADiscoveryForAreaCurtainEntry(area, idx);
+  _areas[ai].curtains[idx] = AreaCurtainEntry{};  // clear slot
+  saveEntities();
+}
+
+void EntityManager::setAreaCurtainEntry(uint8_t area, uint8_t idx,
+                                        const char* name,
+                                        uint8_t openP, uint8_t closeP, uint8_t stopP) {
+  int ai = findArea(area);
+  if (ai < 0 || idx >= MAX_CURTAINS_PER_AREA || !_areas[ai].curtains || !_areas[ai].curtains[idx].used) return;
+  auto& e = _areas[ai].curtains[idx];
+  if (name && name[0]) {
+    strncpy(e.name, name, sizeof(e.name) - 1);
+    e.name[sizeof(e.name) - 1] = '\0';
+  }
+  e.openPreset  = openP;
+  e.closePreset = closeP;
+  e.stopPreset  = stopP;
+  publishHADiscoveryForAreaCurtainEntry(area, idx);
+  saveEntities();
+}
+
+void EntityManager::commandAreaCurtain(uint8_t area, uint8_t curtainIdx, const char* cmd) {
+  int ai = findArea(area);
+  if (ai < 0) return;
+  const AreaState& a = _areas[ai];
+  if (a.areaType != AREA_CURTAIN) return;
+  if (!a.curtains || curtainIdx >= MAX_CURTAINS_PER_AREA || !a.curtains[curtainIdx].used) return;
+  const AreaCurtainEntry& e = a.curtains[curtainIdx];
+  uint8_t preset = 0;
+  if      (strcmp(cmd, "OPEN")  == 0) preset = e.openPreset;
+  else if (strcmp(cmd, "CLOSE") == 0) preset = e.closePreset;
+  else if (strcmp(cmd, "STOP")  == 0) preset = e.stopPreset;
+  if (preset == 0) return;
+  dynet.sendAreaPreset(area, preset, 0);
+  LOGF("[AreaCurtain] A%u ct%u %s -> Preset %u\n", area, curtainIdx, cmd, preset);
+}
+
+// ---- HVAC area management ------------------------------------------
+
+int EntityManager::addHvacMode(uint8_t area, const char* name, uint8_t preset1, uint8_t level) {
+  int ai = findArea(area);
+  if (ai < 0 || _areas[ai].areaType != AREA_HVAC) return -1;
+  if (!_areas[ai].hvac) return -1;
+  auto& h = *_areas[ai].hvac;
+  if (h.modeCount >= MAX_HVAC_MODES) return -1;
+  for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
+    if (!h.modes[i].used) {
+      h.modes[i].used    = true;
+      h.modes[i].preset1 = preset1;
+      h.modes[i].level   = level;
+      strncpy(h.modes[i].name, name ? name : "", sizeof(h.modes[i].name) - 1);
+      h.modes[i].name[sizeof(h.modes[i].name) - 1] = '\0';
+      h.modeCount++;
+      publishHADiscoveryForArea(area);
+      saveEntitiesNow();
+      return i;
+    }
+  }
+  return -1;
+}
+
+int EntityManager::addHvacFanMode(uint8_t area, const char* name, uint8_t preset1, uint8_t level) {
+  int ai = findArea(area);
+  if (ai < 0 || _areas[ai].areaType != AREA_HVAC) return -1;
+  if (!_areas[ai].hvac) return -1;
+  auto& h = *_areas[ai].hvac;
+  if (h.fanCount >= MAX_HVAC_FANMODES) return -1;
+  for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
+    if (!h.fanModes[i].used) {
+      h.fanModes[i].used    = true;
+      h.fanModes[i].preset1 = preset1;
+      h.fanModes[i].level   = level;
+      strncpy(h.fanModes[i].name, name ? name : "", sizeof(h.fanModes[i].name) - 1);
+      h.fanModes[i].name[sizeof(h.fanModes[i].name) - 1] = '\0';
+      h.fanCount++;
+      publishHADiscoveryForArea(area);
+      saveEntitiesNow();
+      return i;
+    }
+  }
+  return -1;
+}
+
+void EntityManager::deleteHvacMode(uint8_t area, uint8_t idx) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac || idx >= MAX_HVAC_MODES) return;
+  auto& h = *_areas[ai].hvac;
+  if (!h.modes[idx].used) return;
+  h.modes[idx] = HvacModeEntry{};
+  if (h.modeCount > 0) h.modeCount--;
+  publishHADiscoveryForArea(area);
+  saveEntities();
+}
+
+void EntityManager::deleteHvacFanMode(uint8_t area, uint8_t idx) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac || idx >= MAX_HVAC_FANMODES) return;
+  auto& h = *_areas[ai].hvac;
+  if (!h.fanModes[idx].used) return;
+  h.fanModes[idx] = HvacModeEntry{};
+  if (h.fanCount > 0) h.fanCount--;
+  publishHADiscoveryForArea(area);
+  saveEntities();
+}
+
+void EntityManager::commandHvacMode(uint8_t area, const char* modeName) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  uint8_t targetArea = h.modeArea ? h.modeArea : area;
+  for (uint8_t i = 0; i < MAX_HVAC_MODES; i++) {
+    if (h.modes[i].used && strcmp(h.modes[i].name, modeName) == 0) {
+      if (h.modeCtrlType == HVAC_CTRL_LEVEL) {
+        dynet.sendFadeToLevel_1s(targetArea, h.modeChannel0, h.modes[i].level, 0);
+        LOGF("[HVAC] A%u mode '%s' -> A%u Ch%u Level %u%%\n",
+             area, modeName, targetArea, h.modeChannel0 + 1, h.modes[i].level);
+      } else {
+        dynet.sendAreaPreset(targetArea, h.modes[i].preset1, 0);
+        LOGF("[HVAC] A%u mode '%s' -> A%u P%u\n",
+             area, modeName, targetArea, h.modes[i].preset1);
+      }
+      strncpy(h.currentMode, modeName, sizeof(h.currentMode) - 1);
+      h.currentMode[sizeof(h.currentMode) - 1] = '\0';
+      publishSensorsForArea(area);
+      saveEntities();
+      return;
+    }
+  }
+  LOGF("[HVAC] A%u mode '%s' not found\n", area, modeName);
+}
+
+void EntityManager::commandHvacFanMode(uint8_t area, const char* fanName) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  uint8_t targetArea = h.fanArea ? h.fanArea : area;
+  for (uint8_t i = 0; i < MAX_HVAC_FANMODES; i++) {
+    if (h.fanModes[i].used && strcmp(h.fanModes[i].name, fanName) == 0) {
+      if (h.fanCtrlType == HVAC_CTRL_LEVEL) {
+        dynet.sendFadeToLevel_1s(targetArea, h.fanChannel0, h.fanModes[i].level, 0);
+        LOGF("[HVAC] A%u fan '%s' -> A%u Ch%u Level %u%%\n",
+             area, fanName, targetArea, h.fanChannel0 + 1, h.fanModes[i].level);
+      } else {
+        dynet.sendAreaPreset(targetArea, h.fanModes[i].preset1, 0);
+        LOGF("[HVAC] A%u fan '%s' -> A%u P%u\n",
+             area, fanName, targetArea, h.fanModes[i].preset1);
+      }
+      strncpy(h.currentFanMode, fanName, sizeof(h.currentFanMode) - 1);
+      h.currentFanMode[sizeof(h.currentFanMode) - 1] = '\0';
+      publishSensorsForArea(area);
+      saveEntities();
+      return;
+    }
+  }
+  LOGF("[HVAC] A%u fan '%s' not found\n", area, fanName);
+}
+
+void EntityManager::setHvacModeCtrl(uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  h.modeCtrlType = ctrlType;
+  h.modeArea     = srcArea;
+  h.modeChannel0 = ch0;
+  publishHADiscoveryForArea(area);
+  saveEntitiesNow();
+  LOGF("[HVAC] A%u mode ctrl: type=%u srcA=%u ch=%u\n", area, ctrlType, srcArea, ch0);
+}
+
+void EntityManager::setHvacFanCtrl(uint8_t area, uint8_t ctrlType, uint8_t srcArea, uint8_t ch0) {
+  int ai = findArea(area);
+  if (ai < 0 || !_areas[ai].hvac) return;
+  auto& h = *_areas[ai].hvac;
+  h.fanCtrlType = ctrlType;
+  h.fanArea     = srcArea;
+  h.fanChannel0 = ch0;
+  publishHADiscoveryForArea(area);
+  saveEntitiesNow();
+  LOGF("[HVAC] A%u fan ctrl: type=%u srcA=%u ch=%u\n", area, ctrlType, srcArea, ch0);
+}
+
